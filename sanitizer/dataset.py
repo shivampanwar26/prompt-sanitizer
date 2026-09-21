@@ -40,7 +40,7 @@ def generate_sanitized_dataset(
     sanitizer = PromptSanitizer(config=config)
     examples = []
     for prompt in prompts:
-        result = sanitizer.sanitize(prompt)
+        result = sanitizer.sanitize(prompt, evaluate=False)
         if include_unchanged or result.text != prompt:
             examples.append(SanitizedExample(prompt, result.text, result.selected_words))
 

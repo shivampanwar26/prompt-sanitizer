@@ -1,36 +1,66 @@
 from typing import List, Optional, Dict, Any
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from sanitizer import PromptSanitizer, SanitizerConfig, PromptEvaluator
+from sanitizer import PromptSanitizer, PromptEvaluator
 
 app = FastAPI(
     title="ProSan Prompt Privacy Sanitizer API",
     description="API for utility-preserving prompt privacy sanitization.",
-    version="1.0.0",
+    version="2.0.0",
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 sanitizer = PromptSanitizer()
 
 
-class SanitizeRequest(BaseModel):
-    prompt: str = Field(..., description="Prompt text to desensitize")
-    history: Optional[List[str]] = Field(None, description="Multi-turn context history")
+class Overrides(BaseModel):
+    mode: Optional[str] = Field(None, description="'prosan' or 'pii_only'")
+    surrogate_style: Optional[str] = Field(None, description="'realistic' or 'placeholder'")
     lambda_scale: Optional[float] = Field(None, description="Override dynamic protection ratio scale factor lambda")
+    min_privacy: Optional[float] = Field(None, description="Override privacy-risk threshold")
     eta: Optional[float] = Field(None, description="Override privacy weight hyperparameter eta")
     tau: Optional[float] = Field(None, description="Override cumulative probability threshold tau")
     sampling_mode: Optional[str] = Field(None, description="Override sampling mode: 'sample' or 'max'")
+
+    def to_overrides(self) -> Dict[str, Any]:
+        # Only this base model's own fields are config overrides — a subclass
+        # (SanitizeRequest, BatchRequest) adds request fields like "prompt"
+        # that must never be forwarded to SanitizerConfig.
+        return {k: v for k, v in self.model_dump(include=set(Overrides.model_fields)).items() if v is not None}
+
+
+class SanitizeRequest(Overrides):
+    prompt: str = Field(..., description="Prompt text to desensitize")
+    history: Optional[List[str]] = Field(None, description="Multi-turn context history")
+    evaluate: bool = Field(True, description="Compute perplexity and PHR")
+
+
+class BatchRequest(Overrides):
+    prompts: List[str]
 
 
 class SanitizeResponse(BaseModel):
     original: str
     sanitized: str
     selected_words: List[Dict[str, Any]]
+    mapping: Dict[str, str] = {}
     H_q: float
     gamma_q: float
     perplexity: Optional[float] = None
     original_perplexity: Optional[float] = None
     phr: Optional[float] = None
+
+
+class RestoreRequest(BaseModel):
+    text: str = Field(..., description="LLM response written against the sanitized prompt")
+    mapping: Dict[str, str] = Field(..., description="The mapping returned by /sanitize")
 
 
 class EvaluateRequest(BaseModel):
@@ -45,6 +75,13 @@ class EvaluateResponse(BaseModel):
     phr_metrics: Optional[Dict[str, Any]] = None
 
 
+def _run(prompt: str, overrides: Dict[str, Any], history=None, evaluate=False):
+    try:
+        return sanitizer.sanitize(prompt, history=history, config_overrides=overrides, evaluate=evaluate)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "ProSan Prompt Sanitizer"}
@@ -52,20 +89,7 @@ def health():
 
 @app.get("/config")
 def get_config():
-    cfg = sanitizer.config
-    return {
-        "causal_model": cfg.causal_model,
-        "mask_model": cfg.mask_model,
-        "lambda_scale": cfg.lambda_scale,
-        "min_privacy": cfg.min_privacy,
-        "max_importance": cfg.max_importance,
-        "eta": cfg.eta,
-        "tau": cfg.tau,
-        "top_k": cfg.top_k,
-        "sampling_mode": cfg.sampling_mode,
-        "pos_filter_enabled": cfg.pos_filter_enabled,
-        "device": cfg.device,
-    }
+    return {k: v for k, v in vars(sanitizer.config).items()}
 
 
 @app.post("/sanitize", response_model=SanitizeResponse)
@@ -73,24 +97,13 @@ def sanitize(request: SanitizeRequest):
     if not request.prompt.strip():
         raise HTTPException(status_code=400, detail="Prompt cannot be empty.")
 
-    if request.lambda_scale is not None:
-        sanitizer.selector.lambda_scale = request.lambda_scale
-    if request.eta is not None:
-        sanitizer.replacement.eta = request.eta
-    if request.tau is not None:
-        sanitizer.replacement.tau = request.tau
-    if request.sampling_mode is not None:
-        sanitizer.replacement.sampling_mode = request.sampling_mode
-
-    result = sanitizer.sanitize(
-        prompt=request.prompt,
-        history=request.history,
-    )
-
+    # Overrides apply to this request only; the shared sanitizer is never mutated.
+    result = _run(request.prompt, request.to_overrides(), request.history, request.evaluate)
     return {
         "original": request.prompt,
         "sanitized": result.text,
         "selected_words": result.selected_words,
+        "mapping": result.mapping,
         "H_q": result.H_q,
         "gamma_q": result.gamma_q,
         "perplexity": result.perplexity,
@@ -99,11 +112,28 @@ def sanitize(request: SanitizeRequest):
     }
 
 
+@app.post("/sanitize/batch")
+def sanitize_batch(request: BatchRequest):
+    """Original -> sanitized training pairs (the dashboard downloads these as JSONL)."""
+    overrides = request.to_overrides()
+    rows = []
+    for prompt in request.prompts:
+        if not prompt.strip():
+            continue
+        result = _run(prompt, overrides)
+        rows.append({"original": prompt, "sanitized": result.text, "selected_words": result.selected_words})
+    return rows
+
+
+@app.post("/restore")
+def restore(request: RestoreRequest):
+    return {"text": PromptSanitizer.restore(request.text, request.mapping)}
+
+
 @app.post("/evaluate", response_model=EvaluateResponse)
 def evaluate(request: EvaluateRequest):
-    ev = sanitizer.evaluator or PromptEvaluator(model_name=sanitizer.config.causal_model, device=sanitizer.config.device)
-    orig_ppl = ev.perplexity(request.original)
-    san_ppl = ev.perplexity(request.sanitized)
+    ev: PromptEvaluator = sanitizer.evaluator
+    orig_ppl, san_ppl = ev.perplexity_batch([request.original, request.sanitized])
 
     phr_info = None
     if request.sensitive_items:

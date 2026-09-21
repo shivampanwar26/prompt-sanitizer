@@ -1,11 +1,23 @@
 causal_model: distilgpt2
 mask_model: roberta-base
-mode: prosan
+mode: prosan              # prosan | pii_only (no language models loaded)
+
+detection:
+  ner_backend: transformer  # transformer | nltk | none
+  ner_model: dslim/distilbert-NER
+  ner_threshold: 0.8
+  propagate_entities: true
+
+surrogates:
+  surrogate_style: realistic  # realistic | placeholder (<PERSON_1>)
 
 selector:
-  lambda_scale: 0.15
-  min_privacy: 0.75
-  max_importance: 0.45
+  lambda_scale: 0.3         # gamma_q = lambda * sigmoid(H_q): max share of words replaced
+  min_privacy: 0.5          # absolute privacy-risk threshold on O_w
+  max_importance: 0.6       # protect words above this utility importance
+  privacy_saturation: 8.0
+  importance_method: attention  # attention | gradient
+  pos_filter_enabled: true
 
 replacement:
   top_k: 15
@@ -13,5 +25,5 @@ replacement:
   tau: 0.9
   sampling_mode: sample
 
-device: cuda
+device: auto
 seed: 42

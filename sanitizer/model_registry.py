@@ -5,14 +5,14 @@ from typing import Dict, Tuple, Any
 _MODEL_CACHE: Dict[str, Tuple[Any, Any]] = {}
 
 
-def _resolve_device(device: str) -> torch.device:
-    if device == "auto":
+def resolve_device(device: str) -> torch.device:
+    if device == "auto" or (device.startswith("cuda") and not torch.cuda.is_available()):
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(device)
 
 
 def get_causal_model_and_tokenizer(model_name: str, device: str = "auto") -> Tuple[Any, Any]:
-    target_device = _resolve_device(device)
+    target_device = resolve_device(device)
 
     cache_key = f"causal_{model_name}_{target_device}"
     if cache_key in _MODEL_CACHE:
@@ -37,7 +37,7 @@ def get_causal_model_and_tokenizer(model_name: str, device: str = "auto") -> Tup
 
 
 def get_mask_model_and_tokenizer(model_name: str, device: str = "auto") -> Tuple[Any, Any]:
-    target_device = _resolve_device(device)
+    target_device = resolve_device(device)
 
     cache_key = f"mask_{model_name}_{target_device}"
     if cache_key in _MODEL_CACHE:
@@ -56,3 +56,41 @@ def get_mask_model_and_tokenizer(model_name: str, device: str = "auto") -> Tuple
 
     _MODEL_CACHE[cache_key] = (model, tokenizer)
     return model, tokenizer
+
+
+def get_vocab_masks(model_name: str, tokenizer, device: torch.device) -> Dict[str, torch.Tensor]:
+    """Boolean masks over the MLM vocabulary for whole-word replacement candidates.
+
+    Keys are "<ws|nows>_<upper|lower>": whether the token starts a new word
+    after whitespace (RoBERTa "Ġ", SentencePiece "▁", or any non-"##" WordPiece
+    token) and whether it is capitalised.  Only alphabetic tokens of length >= 2
+    qualify, so punctuation, digits and sub-word fragments are never proposed.
+    """
+    cache_key = f"vocab_{model_name}_{device}"
+    if cache_key in _MODEL_CACHE:
+        return _MODEL_CACHE[cache_key]
+
+    size = len(tokenizer)
+    masks = {k: torch.zeros(size, dtype=torch.bool) for k in ("ws_upper", "ws_lower", "nows_upper", "nows_lower")}
+    wordpiece = any(t.startswith("##") for t in list(tokenizer.get_vocab())[:5000])
+    special = set(tokenizer.all_special_ids)
+
+    for token, idx in tokenizer.get_vocab().items():
+        if idx >= size or idx in special:
+            continue
+        if token.startswith(("Ġ", "▁")):
+            ws, text = True, token[1:]
+        elif wordpiece:
+            if token.startswith("##"):
+                continue
+            ws, text = True, token
+        else:
+            ws, text = False, token
+        if len(text) < 2 or not text.isalpha() or not text.isascii():
+            continue
+        case = "upper" if text[0].isupper() else "lower"
+        masks[f"{'ws' if ws else 'nows'}_{case}"][idx] = True
+
+    masks = {k: v.to(device) for k, v in masks.items()}
+    _MODEL_CACHE[cache_key] = masks
+    return masks

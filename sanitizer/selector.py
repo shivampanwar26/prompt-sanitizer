@@ -1,34 +1,14 @@
 import math
 import re
+from dataclasses import dataclass, field
 from typing import List, Dict, Tuple
+
+from .privacy import is_sentence_initial
 from .types import WordScore
-
-try:
-    import nltk
-    _NLTK_AVAILABLE = True
-except ImportError:
-    _NLTK_AVAILABLE = False
-
-
-def _ensure_nltk_pos():
-    if not _NLTK_AVAILABLE:
-        return
-    try:
-        nltk.pos_tag(["test"])
-    except LookupError:
-        try:
-            nltk.download("averaged_perceptron_tagger", quiet=True)
-            nltk.download("averaged_perceptron_tagger_eng", quiet=True)
-            nltk.download("punkt", quiet=True)
-            nltk.download("punkt_tab", quiet=True)
-        except Exception:
-            pass
 
 
 # Code-structural tokens that must never be replaced because they carry
 # functional meaning (library names, keywords, built-in identifiers).
-# This is a lightweight heuristic: if the word looks like a Python/JS/SQL
-# identifier, dotted module path, or well-known keyword, protect it.
 _CODE_KEYWORD_RE = re.compile(
     r"^(?:"
     r"[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)+"   # dotted module paths: psycopg2.connect, os.path
@@ -43,84 +23,117 @@ _CODE_KEYWORD_RE = re.compile(
     re.I,
 )
 
+# Capitalised words that are public vocabulary, not identities.
+_PUBLIC_PROPER = {
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+    "january", "february", "march", "april", "may", "june", "july", "august",
+    "september", "october", "november", "december", "english", "hindi", "python",
+    "java", "javascript", "typescript", "linux", "windows", "android", "ios", "sql",
+    "postgres", "postgresql", "mysql", "docker", "kubernetes", "react", "google",
+    "covid", "christmas", "diwali", "god", "internet", "excel", "word", "dr", "mr",
+    "mrs", "ms", "prof", "ai", "gpt", "llm", "api",
+    # Languages, nationalities and other public adjectives that are capitalised
+    # in English but do not identify anyone.
+    "french", "spanish", "german", "italian", "chinese", "japanese", "korean",
+    "russian", "arabic", "portuguese", "dutch", "swedish", "greek", "latin",
+    "european", "asian", "african", "australian", "canadian", "mexican",
+    "christian", "muslim", "hindu", "buddhist", "jewish", "roman", "victorian",
+}
+
+_STOPWORDS = {
+    "a", "an", "the", "and", "or", "but", "if", "of", "to", "in", "on", "at", "by",
+    "for", "with", "from", "as", "is", "are", "was", "were", "be", "been", "it",
+    "this", "that", "these", "those", "i", "me", "my", "you", "your", "he", "she",
+    "his", "her", "we", "our", "they", "their", "what", "which", "who", "how",
+    "why", "when", "where", "not", "no", "yes", "do", "does", "did", "have", "has",
+    "had", "can", "could", "should", "would", "will", "please", "also", "very",
+}
+
+# Units that make an adjacent number factual/contextual data rather than PII.
+_UNIT_RE = re.compile(
+    r"(?:°[FC]?|[FC]\b"
+    r"|mg|kg|lbs?|oz|g|ml|L\b|mcg|IU|mg/dL|mmHg|bpm"
+    r"|mm|cm|m\b|km|ft|in\b|inch(?:es)?|mph|km/h|kph"
+    r"|%|percent|x\b|times"
+    r"|days?|hours?|hrs?|minutes?|mins?|seconds?|secs?|weeks?|months?|years?|yrs?)",
+    re.I,
+)
+_UNIT_BEFORE_RE = re.compile(r"(?:day|week|month|year|step|stage|grade|type|level|version|v|chapter|page|room|floor)\s*$", re.I)
+
+
+@dataclass
+class SelectionUnit:
+    """One entity to desensitize, covering every mention of it in the prompt."""
+    text: str
+    occurrences: List[Tuple[int, int]]
+    importance: float
+    privacy: float
+    raw_privacy: float
+    pos_tag: str
+    members: List[WordScore] = field(default_factory=list)
+    replacement: str = ""
+
 
 class WordSelector:
     """
-    ProSan Adaptive Word Selection (Section V-A).
+    ProSan Adaptive Word Selection (Section V-A) — Enhanced.
 
-    1. Calculates prompt-level average self-information H_q = (1/k) * sum(I_wj).
-    2. Dynamically calculates protection ratio gamma_q = lambda_scale * (1 / (1 + exp(-H_q))).
-    3. Preserves high-importance words (K_w > max_importance) to maintain output utility & task intent.
-    4. Protects code-structural tokens (library names, keywords, dotted identifiers).
-    5. Filters out structural function words (prepositions, conjunctions, articles, pronouns) via POS tagging.
-    6. Focuses desensitization on low-importance content words with high privacy self-information risk.
+    1. H_q = mean self-information; budget gamma_q = lambda * sigmoid(H_q) (Eq. 7).
+    2. Eligibility: content words (POS) that are not code tokens, measurement
+       numbers, stop words or public proper nouns.  Words with utility
+       importance above ``max_importance`` are protected unless they look like
+       identities (proper-noun prior), because names are almost never what a
+       task depends on.
+    3. Absolute threshold O_w >= min_privacy (calibrated scores, see privacy.py);
+       the gamma_q budget is an upper bound, not a quota, so benign prompts are
+       left untouched.
+    4. Selection is per *entity*: every mention of a selected word is selected,
+       and adjacent selected capitalised words are merged ("Estrella Garcia")
+       so they are replaced as one unit.
+    5. Priority is privacy minus a utility penalty: O_w - 0.5 * K_w.
     """
 
-    # Content word POS tag prefixes in Penn Treebank tagset (Nouns, Adjectives, Adverbs, Numbers)
-    CONTENT_POS_PREFIXES = ("NN", "JJ", "RB", "CD")
+    CONTENT_POS_PREFIXES = ("NN", "JJ", "RB", "CD", "FW")
 
-    def __init__(self, lambda_scale=0.25, min_privacy=0.5, max_importance=0.75, pos_filter_enabled=True):
+    def __init__(self, lambda_scale=0.3, min_privacy=0.5, max_importance=0.6, pos_filter_enabled=True):
         self.lambda_scale = lambda_scale
         self.min_privacy = min_privacy
         self.max_importance = max_importance
         self.pos_filter_enabled = pos_filter_enabled
-        self._pos_checked = False
-
-    def _tag_pos(self, tokens: List[str]) -> List[str]:
-        if not self.pos_filter_enabled or not _NLTK_AVAILABLE:
-            return ["NN" for _ in tokens]
-
-        if not self._pos_checked:
-            _ensure_nltk_pos()
-            self._pos_checked = True
-
-        try:
-            tagged = nltk.pos_tag(tokens)
-            return [tag for _, tag in tagged]
-        except Exception:
-            return ["NN" for _ in tokens]
 
     @staticmethod
     def _is_code_structural(word: str) -> bool:
-        """Return True if the word looks like a code keyword or structural identifier."""
         if _CODE_KEYWORD_RE.match(word):
             return True
-        # Dotted paths not caught by the regex (e.g. very long chains)
         if "." in word and all(part.isidentifier() for part in word.split(".")):
             return True
-        return False
+        return bool(re.search(r"_|[a-z][A-Z]", word))   # snake_case / camelCase identifiers
 
-    # Units that make an adjacent number factual/contextual data rather than PII.
-    _UNIT_RE = re.compile(
-        r"(?:°[FC]|[FC]$"             # temperature: °F, °C
-        r"|mg|kg|lb|lbs|oz|g|ml|L"     # weight/volume
-        r"|mm|cm|m|km|ft|in|inch"      # distance
-        r"|mph|km/h|kph"               # speed
-        r"|%|percent"                  # percentage
-        r"|days?|hours?|hrs?|minutes?|mins?|seconds?|secs?|weeks?|months?|years?"  # time
-        r"|bpm|mmHg|IU|mcg|mg/dL"      # medical units
-        r")",
-        re.I,
-    )
+    @staticmethod
+    def _is_number_with_unit(item: WordScore, full_text: str) -> bool:
+        if not re.fullmatch(r"\d+(?:\.\d+)?", item.word) or not full_text:
+            return False
+        after = full_text[item.end:item.end + 12].lstrip()
+        if _UNIT_RE.match(after):
+            return True
+        return bool(_UNIT_BEFORE_RE.search(full_text[max(0, item.start - 12):item.start]))
 
-    def _is_number_with_unit(self, item: WordScore, full_text: str) -> bool:
-        """Return True if this word is a number adjacent to a measurement unit."""
+    def _eligible(self, item: WordScore, full_text: str) -> bool:
         w = item.word
-        # Only protect numeric-looking words
-        if not re.match(r"^\d+\.?\d*$", w):
+        lower = w.lower()
+        if lower in _STOPWORDS or lower in _PUBLIC_PROPER or len(w) < 2 and not w.isdigit():
             return False
-        if not full_text:
+        if self._is_code_structural(w) or self._is_number_with_unit(item, full_text):
             return False
-        # Check text immediately after the number for a unit
-        after = full_text[item.end:item.end + 12]
-        if self._UNIT_RE.match(after.lstrip()):
-            return True
-        # Also check for "unit NUMBER" patterns like "day 2"
-        before = full_text[max(0, item.start - 12):item.start]
-        if self._UNIT_RE.search(before.split()[-1]) if before.strip() else False:
-            return True
-        return False
-
+        # Sentence-initial capitalisation is English orthography, not an identity
+        # signal — "Translate this" must not get the same pass as "Estrella said".
+        capitalized = w[:1].isupper() and not is_sentence_initial(full_text, item.start)
+        looks_like_identity = capitalized or any(ch.isdigit() for ch in w)
+        if self.pos_filter_enabled and not looks_like_identity and not item.pos_tag.startswith(self.CONTENT_POS_PREFIXES):
+            return False
+        if item.importance > self.max_importance and not looks_like_identity:
+            return False
+        return item.privacy >= self.min_privacy
 
     def select(
         self,
@@ -128,78 +141,64 @@ class WordSelector:
         importance: List[float],
         privacy: List[float],
         raw_privacy: List[float],
+        pos_tags: List[str],
         full_text: str = "",
-    ) -> Tuple[List[WordScore], float, float]:
-        """
-        Returns (selected_words, H_q, gamma_q)
-        """
+    ) -> Tuple[List[SelectionUnit], float, float]:
+        """Returns (selection units, H_q, gamma_q)."""
         if not words:
             return [], 0.0, 0.0
 
-        # Calculate average self-information H_q over all words in prompt
-        H_q = sum(raw_privacy) / len(raw_privacy) if raw_privacy else 0.0
-
-        # Formula (7): gamma_q = lambda_scale * (1 / (1 + exp(-H_q)))
+        H_q = sum(raw_privacy) / len(raw_privacy)
         gamma_q = self.lambda_scale * (1.0 / (1.0 + math.exp(-H_q)))
 
-        tokens = [w["word"] for w in words]
-        pos_tags = self._tag_pos(tokens)
+        items = [
+            WordScore(word=w["word"], start=w["start"], end=w["end"], importance=importance[i],
+                      privacy=privacy[i], raw_privacy=raw_privacy[i], pos_tag=pos_tags[i])
+            for i, w in enumerate(words)
+        ]
 
-        items = []
-        for i, word in enumerate(words):
-            items.append(
-                WordScore(
-                    word=word["word"],
-                    start=word["start"],
-                    end=word["end"],
-                    importance=importance[i],
-                    privacy=privacy[i],
-                    raw_privacy=raw_privacy[i],
-                    pos_tag=pos_tags[i],
-                )
-            )
-
-        # Build eligible list: exclude PII placeholders, high-importance words, and code tokens
-        eligible = []
+        # Rank distinct surface forms; the budget counts entities, not mentions.
+        by_form: Dict[str, List[WordScore]] = {}
         for item in items:
-            w_str = item.word
-            # Skip PII placeholder tokens
-            if w_str.startswith("<") or w_str.endswith(">"):
-                continue
-            if w_str in {"EMAIL", "PHONE", "URL", "IP_ADDRESS", "API_KEY",
-                         "CREDIT_CARD", "PASSWORD", "DB_USER", "DB_HOST",
-                         "CARD_NUMBER", "DATE", "PERSON", "ADDRESS", "LOCATION"}:
-                continue
-            # Preserve high-importance words (K_w > max_importance)
-            if item.importance > self.max_importance:
-                continue
-            # Protect code-structural tokens
-            if self._is_code_structural(w_str):
-                continue
-            # Protect numbers that appear next to units (medical, measurement, time)
-            if self._is_number_with_unit(item, full_text):
-                continue
-            eligible.append(item)
+            by_form.setdefault(item.word.lower(), []).append(item)
 
-        # Filter by POS and privacy threshold
-        # Filter by POS: only content words (nouns, adjectives, adverbs, numbers) are
-        # eligible. If no content words pass, we select nothing — replacing verbs,
-        # determiners, or prepositions would break grammar with no privacy gain.
-        if self.pos_filter_enabled:
-            candidates = [
-                x for x in eligible
-                if x.pos_tag.startswith(self.CONTENT_POS_PREFIXES)
-                and x.privacy >= self.min_privacy
-            ]
-        else:
-            candidates = [x for x in eligible if x.privacy >= self.min_privacy]
+        ranked = []
+        for form, mentions in by_form.items():
+            if any(self._eligible(m, full_text) for m in mentions):
+                best = max(mentions, key=lambda m: m.privacy)
+                min_imp = min(m.importance for m in mentions)
+                ranked.append((best.privacy - 0.5 * min_imp, form))
+        ranked.sort(reverse=True)
 
-        # Sort candidates by ascending importance (lowest utility impact first)
-        candidates.sort(key=lambda x: (x.importance, -x.privacy))
+        budget = max(1, int(math.ceil(len(items) * gamma_q))) if ranked else 0
+        chosen = {form for _, form in ranked[:budget]}
+        selected = [item for item in items if item.word.lower() in chosen]
 
-        # Protection ratio determines target count
-        count = max(1, int(math.ceil(len(items) * gamma_q))) if candidates else 0
-        selected = candidates[:count]
+        return self._merge_units(selected, full_text), H_q, gamma_q
 
-        return selected, H_q, gamma_q
+    @staticmethod
+    def _merge_units(selected: List[WordScore], full_text: str) -> List[SelectionUnit]:
+        # Merge runs like "Estrella Garcia" (capitalised, separated by one space).
+        runs: List[List[WordScore]] = []
+        for item in sorted(selected, key=lambda x: x.start):
+            prev = runs[-1][-1] if runs else None
+            if (prev is not None and item.word[:1].isupper() and prev.word[:1].isupper()
+                    and full_text[prev.end:item.start] == " "):
+                runs[-1].append(item)
+            else:
+                runs.append([item])
 
+        units: Dict[str, SelectionUnit] = {}
+        for run in runs:
+            start, end = run[0].start, run[-1].end
+            text = full_text[start:end] if full_text else " ".join(m.word for m in run)
+            key = text.lower()
+            if key not in units:
+                units[key] = SelectionUnit(
+                    text=text, occurrences=[], importance=max(m.importance for m in run),
+                    privacy=max(m.privacy for m in run), raw_privacy=sum(m.raw_privacy for m in run),
+                    pos_tag=run[0].pos_tag,
+                )
+            units[key].occurrences.append((start, end))
+            units[key].members.extend(run)
+        return list(units.values())

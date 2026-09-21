@@ -1,236 +1,156 @@
+import hashlib
 import math
 import random
-from typing import List, Tuple, Optional
+from typing import Iterable, List, Optional, Set, Tuple
+
 import torch
-from .model_registry import get_mask_model_and_tokenizer
+
+from .model_registry import get_mask_model_and_tokenizer, get_vocab_masks
+from .selector import SelectionUnit, _STOPWORDS
 from .similarity import SimilarityCalculator
-from .types import WordScore
 
 
 class ReplacementGenerator:
     """
     ProSan Sanitized Word Generation (Section V-B) — Enhanced.
 
-    Improvements over the paper:
-    1. Batched replacement: all mask positions in one forward pass
-    2. Contextual re-scoring: MLM probability × ProSan score
-    3. Embedding similarity: cosine similarity from model embeddings
+    1. Entity-level masking: *every* mention of the entity is masked in the
+       same input and the per-position log-probabilities are averaged, so the
+       MLM cannot simply copy the name back from another mention.
+    2. Vocabulary masks restrict candidates to whole, alphabetic words with the
+       original's capitalisation – no sub-word fragments, digits or punctuation.
+    3. Leak filter: the original word, anything sharing its stem, stop words and
+       every other sensitive word of the prompt are never proposed.
+    4. Cumulative truncation at tau, then Eq. 9 re-scoring on the MLM prior:
+           p'_i  ∝  p_i * exp((K_w - eta * O_w) * s_i)
+       (s_i = embedding cosine similarity), so high-privacy words move away
+       from look-alike candidates while staying fluent in context.
+    5. All entities are scored in one batched forward pass; sampling uses a
+       per-entity seeded RNG, so results are reproducible and a given entity
+       gets the same replacement wherever it appears.
     """
 
-    def __init__(
-        self,
-        model_name="roberta-base",
-        top_k=15,
-        eta=1.0,
-        tau=0.9,
-        sampling_mode="sample",
-        device="auto",
-        seed=42,
-    ):
+    CONTEXT_CHARS = 1500  # window around the entity sent to the MLM (512-token limit)
+
+    def __init__(self, model_name="roberta-base", top_k=15, eta=1.0, tau=0.9,
+                 sampling_mode="sample", device="auto", seed=42):
         self.top_k = top_k
         self.eta = eta
         self.tau = tau
         self.sampling_mode = sampling_mode
-
-        if seed is not None:
-            random.seed(seed)
-            torch.manual_seed(seed)
+        self.seed = seed
 
         self.model, self.tokenizer = get_mask_model_and_tokenizer(model_name, device)
         self.device = next(self.model.parameters()).device
+        self.vocab_masks = get_vocab_masks(model_name, self.tokenizer, self.device)
+        self.similarity_calc = SimilarityCalculator(model=self.model, tokenizer=self.tokenizer)
 
-        # Pass model/tokenizer to similarity calculator for embedding-based similarity
-        self.similarity_calc = SimilarityCalculator(
-            model=self.model, tokenizer=self.tokenizer
-        )
+    # ── helpers ─────────────────────────────────────────────────
+    def _masked_input(self, text: str, unit: SelectionUnit) -> Tuple[str, str]:
+        """Mask every occurrence (inside a context window); return (masked text, vocab key)."""
+        first_start, first_end = unit.occurrences[0]
+        lo = max(0, first_start - self.CONTEXT_CHARS // 2)
+        hi = min(len(text), first_end + self.CONTEXT_CHARS // 2)
 
-    @torch.no_grad()
-    def _batch_get_candidates(
-        self, text: str, words: List[WordScore]
-    ) -> List[List[Tuple[str, float]]]:
-        """Get candidates for ALL words in a single batched forward pass."""
-        if not words:
-            return []
-
-        mask_token = self.tokenizer.mask_token
-        mask_token_id = self.tokenizer.mask_token_id
-
-        # Create N masked copies of the text
-        masked_texts = []
-        for word in words:
-            masked = text[:word.start] + mask_token + text[word.end:]
-            masked_texts.append(masked)
-
-        # Tokenize all copies with padding
-        encoded = self.tokenizer(
-            masked_texts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=512,
-        ).to(self.device)
-
-        # Single batched forward pass
-        logits = self.model(**encoded).logits  # (N, seq_len, vocab)
-
-        all_candidates = []
-        for i in range(len(words)):
-            # Find mask position in this sequence
-            mask_positions = (
-                encoded["input_ids"][i] == mask_token_id
-            ).nonzero(as_tuple=True)[0]
-
-            if len(mask_positions) == 0:
-                all_candidates.append([])
+        pieces, cursor = [], lo
+        for start, end in sorted(unit.occurrences):
+            if start < lo or end > hi:
                 continue
+            pieces.append(text[cursor:start])
+            pieces.append(self.tokenizer.mask_token)
+            cursor = end
+        pieces.append(text[cursor:hi])
 
-            position = mask_positions[0]
-            probs = torch.softmax(logits[i, position].float(), dim=-1)
-            top_probs, top_indices = torch.topk(
-                probs, min(self.top_k * 2, probs.shape[-1])
-            )
+        prev = text[first_start - 1] if first_start > 0 else ""
+        ws = "ws" if prev in (" ", "\t", "\n") else "nows"
+        case = "upper" if unit.text[:1].isupper() else "lower"
+        return "".join(pieces), f"{ws}_{case}"
 
-            candidates = []
-            cum_prob = 0.0
-            for prob_val, idx in zip(top_probs.tolist(), top_indices.tolist()):
-                candidate = self.tokenizer.decode(
-                    [idx], skip_special_tokens=True
-                ).strip()
+    @staticmethod
+    def _leaks(candidate: str, forbidden: Set[str]) -> bool:
+        c = candidate.lower()
+        if c in forbidden or c in _STOPWORDS:
+            return True
+        for f in forbidden:
+            if len(f) >= 4 and len(c) >= 4 and (c[:4] == f[:4] or f in c or c in f):
+                return True
+        return False
 
-                if not candidate or " " in candidate:
+    def _rng(self, unit: SelectionUnit) -> random.Random:
+        digest = hashlib.sha256(f"{self.seed}\x1f{unit.text.lower()}".encode("utf-8")).digest()
+        return random.Random(int.from_bytes(digest[:8], "big"))
+
+    # ── candidate generation ────────────────────────────────────
+    @torch.no_grad()
+    def candidates(self, text: str, units: List[SelectionUnit],
+                   forbidden: Iterable[str] = ()) -> List[List[Tuple[str, int, float]]]:
+        """Return, for each unit, [(word, token_id, p_i)] after filtering and tau-truncation."""
+        if not units:
+            return []
+        forbidden = {f.lower() for f in forbidden}
+
+        inputs, keys = zip(*(self._masked_input(text, u) for u in units))
+        encoded = self.tokenizer(list(inputs), return_tensors="pt", padding=True,
+                                 truncation=True, max_length=512).to(self.device)
+        logits = self.model(**encoded).logits
+
+        results = []
+        for i, unit in enumerate(units):
+            positions = (encoded["input_ids"][i] == self.tokenizer.mask_token_id).nonzero(as_tuple=True)[0]
+            if len(positions) == 0:
+                results.append([])
+                continue
+            log_probs = torch.log_softmax(logits[i, positions].float(), dim=-1).mean(dim=0)
+            log_probs = log_probs.masked_fill(~self.vocab_masks[keys[i]], float("-inf"))
+            probs = torch.softmax(log_probs, dim=-1)
+
+            unit_forbidden = forbidden | {p.lower() for p in unit.text.split()}
+            top_p, top_i = torch.topk(probs, min(self.top_k * 4, probs.shape[-1]))
+            picked = []
+            for p, idx in zip(top_p.tolist(), top_i.tolist()):
+                if p <= 0:
+                    break
+                word = self.tokenizer.decode([idx]).strip()
+                if not word or self._leaks(word, unit_forbidden):
                     continue
-
-                candidates.append((candidate, prob_val))
-                cum_prob += prob_val
-
-                if cum_prob >= self.tau or len(candidates) >= self.top_k:
+                picked.append((word, idx, p))
+                if len(picked) >= self.top_k:
                     break
 
-            all_candidates.append(candidates)
+            # Cumulative truncation (paper): smallest prefix with mass >= tau.
+            total = sum(p for _, _, p in picked)
+            kept, cum = [], 0.0
+            for word, idx, p in picked:
+                kept.append((word, idx, p / total))
+                cum += p / total
+                if cum >= self.tau:
+                    break
+            results.append(kept)
+        return results
 
-        return all_candidates
-
-    @torch.no_grad()
-    def get_candidates_with_probabilities(
-        self, text: str, word: WordScore
-    ) -> List[Tuple[str, float]]:
-        """Single-word fallback (used when batch fails)."""
-        masked_text = (
-            text[:word.start]
-            + self.tokenizer.mask_token
-            + text[word.end:]
-        )
-
-        encoded = self.tokenizer(masked_text, return_tensors="pt").to(self.device)
-
-        mask_token_id = self.tokenizer.mask_token_id
-        mask_positions = (
-            encoded["input_ids"][0] == mask_token_id
-        ).nonzero(as_tuple=True)[0]
-
-        if len(mask_positions) == 0:
-            return []
-
-        position = mask_positions[0]
-
-        logits = self.model(**encoded).logits[0, position]
-        probs = torch.softmax(logits.float(), dim=-1)
-
-        top_probs, top_indices = torch.topk(probs, min(self.top_k * 2, probs.shape[-1]))
-
-        candidates = []
-        cum_prob = 0.0
-
-        for prob, idx in zip(top_probs.tolist(), top_indices.tolist()):
-            candidate = self.tokenizer.decode([idx], skip_special_tokens=True).strip()
-
-            if not candidate or " " in candidate:
-                continue
-
-            candidates.append((candidate, prob))
-            cum_prob += prob
-
-            if cum_prob >= self.tau or len(candidates) >= self.top_k:
-                break
-
-        return candidates
-
-    def _score_candidates(
-        self, word: WordScore, candidates: List[Tuple[str, float]]
-    ) -> str:
-        """Score candidates using contextual re-scoring: P_MLM × exp(ProSan_score).
-
-        This improves over the paper by incorporating the masked LM's own
-        probability, ensuring replacements are both semantically appropriate
-        AND privacy-maximizing.
-        """
+    def choose(self, unit: SelectionUnit, candidates: List[Tuple[str, int, float]]) -> Optional[str]:
+        """Eq. 9 re-scoring on top of the MLM prior, then sample or argmax."""
         if not candidates:
-            return word.word  # No replacement found
+            return None
+        sims = self.similarity_calc.similarity_to_ids(unit.text, [idx for _, idx, _ in candidates])
+        exponent = unit.importance - self.eta * unit.privacy
+        scores = [p * math.exp(exponent * s) for (_, _, p), s in zip(candidates, sims)]
+        total = sum(scores)
+        words = [w for w, _, _ in candidates]
 
-        scored = []
-        cand_words = []
+        # Degenerate scores (e.g. a zero embedding vector) must never crash
+        # sampling; fall back to the masked LM's own ranking instead.
+        if not math.isfinite(total) or total <= 0:
+            return candidates[max(range(len(candidates)), key=lambda i: candidates[i][2])][0]
+        weights = [s / total for s in scores]
+        if self.sampling_mode == "max" or len(words) == 1:
+            return words[max(range(len(words)), key=weights.__getitem__)]
+        return self._rng(unit).choices(words, weights=weights, k=1)[0]
 
-        for cand, mlm_prob in candidates:
-            s_i = self.similarity_calc.similarity(word.word, cand)
-            # Contextual re-scoring: P_MLM(c_i) × exp((K_w - η·O_w) · s_i)
-            prosan_score = (word.importance - self.eta * word.privacy) * s_i
-            combined_score = mlm_prob * math.exp(prosan_score)
-            scored.append(combined_score)
-            cand_words.append(cand)
-
-        # Normalize to probability distribution
-        total = sum(scored)
-        if total <= 0:
-            return cand_words[0]
-        p_prime = [s / total for s in scored]
-
-        if self.sampling_mode == "max" or len(cand_words) == 1:
-            best_idx = max(range(len(p_prime)), key=lambda i: p_prime[i])
-            return cand_words[best_idx]
-        else:
-            return random.choices(cand_words, weights=p_prime, k=1)[0]
-
-    def replace(
-        self, text: str, selected_words: List[WordScore]
-    ) -> Tuple[str, List[WordScore]]:
-        """Replace selected words using batched inference + contextual re-scoring."""
-        if not selected_words:
-            return text, selected_words
-
-        sorted_words = sorted(selected_words, key=lambda x: x.start, reverse=True)
-
-        # Try batched replacement first
-        try:
-            # Get candidates for all words in one forward pass
-            # Use forward-sorted order for batch, then apply in reverse
-            forward_words = sorted(sorted_words, key=lambda x: x.start)
-            all_candidates = self._batch_get_candidates(text, forward_words)
-
-            # Map candidates back to reverse-sorted order
-            candidate_map = {w.start: cands for w, cands in zip(forward_words, all_candidates)}
-
-            result_text = text
-            for word in sorted_words:
-                candidates = candidate_map.get(word.start, [])
-                replacement = self._score_candidates(word, candidates)
-                word.replacement = replacement
-                result_text = (
-                    result_text[:word.start]
-                    + replacement
-                    + result_text[word.end:]
-                )
-
-        except Exception:
-            # Fallback to sequential replacement
-            result_text = text
-            for word in sorted_words:
-                candidates = self.get_candidates_with_probabilities(result_text, word)
-                replacement = self._score_candidates(word, candidates)
-                word.replacement = replacement
-                result_text = (
-                    result_text[:word.start]
-                    + replacement
-                    + result_text[word.end:]
-                )
-
-        return result_text, selected_words
+    def replace(self, text: str, units: List[SelectionUnit], forbidden: Iterable[str] = ()) -> None:
+        """Fill ``unit.replacement`` for every unit (None when no safe candidate exists)."""
+        # Numeric identifiers are better served by format-preserving surrogates.
+        textual = [u for u in units if not any(ch.isdigit() for ch in u.text)]
+        forbidden = set(forbidden) | {u.text for u in units} | {m.word for u in units for m in u.members}
+        for unit, cands in zip(textual, self.candidates(text, textual, forbidden)):
+            unit.replacement = self.choose(unit, cands) or ""
