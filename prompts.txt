@@ -1,0 +1,8 @@
+My email is shivam@gmail.com and I have fever.
+Please call me at +91 98765 43210 about my appointment tomorrow.
+Send the report to patient.records@example.org.
+My server is running at 192.168.1.25 and the dashboard is https://example.com/admin.
+Use this test card number 4111 1111 1111 1111 for the payment form.
+My API token is sk_test_abcdefghijklmnopqrstuvwxyz123456.
+I have had a headache and sore throat for two days.
+What are safe home-care steps for a mild fever?

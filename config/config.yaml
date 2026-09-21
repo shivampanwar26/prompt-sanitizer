@@ -1,0 +1,17 @@
+causal_model: distilgpt2
+mask_model: roberta-base
+mode: prosan
+
+selector:
+  lambda_scale: 0.15
+  min_privacy: 0.75
+  max_importance: 0.45
+
+replacement:
+  top_k: 15
+  eta: 1.0
+  tau: 0.9
+  sampling_mode: sample
+
+device: cuda
+seed: 42
