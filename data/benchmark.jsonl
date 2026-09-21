@@ -1,0 +1,45 @@
+{"category": "medical", "prompt": "Jack was born on July 2nd and has had a fever of 103°F for 2 days. What steps should be taken?", "sensitive": ["Jack", "July 2nd"], "keep": ["fever", "103", "2 days"]}
+{"category": "medical", "prompt": "Sarah was born on March 14th and lives at 42 Oak Street, Seattle. What should she do about her recurring headaches?", "sensitive": ["Sarah", "March 14th", "42 Oak Street", "Seattle"], "keep": ["recurring headaches"]}
+{"category": "medical", "prompt": "My email is john@example.com and my phone is 555-123-4567. I need help with chest pain.", "sensitive": ["john@example.com", "555-123-4567"], "keep": ["chest pain"]}
+{"category": "medical", "prompt": "Contact Dr. Emily Chen at emily.chen@hospital.org for the lab results from 05/12/2024.", "sensitive": ["Emily Chen", "emily.chen@hospital.org", "05/12/2024"], "keep": ["lab results"]}
+{"category": "medical", "prompt": "Patient John Doe, 45, from Denver has dyspnea and swollen ankles. Is this heart failure?", "sensitive": ["John Doe", "Denver"], "keep": ["dyspnea", "swollen ankles", "heart failure"]}
+{"category": "medical", "prompt": "My name is Priya Nair and I have been taking 500 mg metformin twice daily. Can I drink alcohol?", "sensitive": ["Priya Nair"], "keep": ["500 mg", "metformin", "twice daily", "alcohol"]}
+{"category": "medical", "prompt": "My son Aarav has a rash on his arms after eating peanuts. Should I give him an antihistamine?", "sensitive": ["Aarav"], "keep": ["rash", "peanuts", "antihistamine"]}
+{"category": "medical", "prompt": "I am Marcus Webb, patient ID MRN-4829301, and my blood pressure is 150/95. Is that dangerous?", "sensitive": ["Marcus Webb", "MRN-4829301"], "keep": ["blood pressure", "dangerous"]}
+{"category": "medical", "prompt": "Mrs. Fernandez in room 12 was prescribed warfarin. Can she take ibuprofen for her knee pain?", "sensitive": ["Fernandez"], "keep": ["warfarin", "ibuprofen", "knee pain"]}
+{"category": "medical", "prompt": "Olivia Grant told me Olivia's insulin dose was doubled last week. Is hypoglycemia a risk for Olivia?", "sensitive": ["Olivia Grant", "Olivia"], "keep": ["insulin", "hypoglycemia"]}
+{"category": "code", "prompt": "connection = psycopg2.connect(host=114.165.14.1, database=production, user=Estrella, password=>@]@x5<pSA) The above code raises an ImportError. Please fix it.", "sensitive": ["114.165.14.1", "Estrella", ">@]@x5<pSA"], "keep": ["psycopg2.connect", "ImportError", "database"]}
+{"category": "code", "prompt": "My OpenAI key sk-proj-Ab3dE5fG7hI9jK1lM3nO5pQ7 is returning 401 errors in this Python script. Why?", "sensitive": ["sk-proj-Ab3dE5fG7hI9jK1lM3nO5pQ7"], "keep": ["401", "Python"]}
+{"category": "code", "prompt": "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE is set but boto3 still says credentials not found.", "sensitive": ["AKIAIOSFODNN7EXAMPLE"], "keep": ["boto3", "credentials"]}
+{"category": "code", "prompt": "Why does git push to https://github.com/rkapoor/payroll-service.git ask for my password every time?", "sensitive": ["rkapoor"], "keep": ["git push", "password"]}
+{"category": "code", "prompt": "The server at 10.0.4.17 keeps dropping SSH connections for user deploy_admin after 60 seconds.", "sensitive": ["10.0.4.17"], "keep": ["SSH", "60 seconds"]}
+{"category": "code", "prompt": "db_config = {'host': 'prod-db.internal.acme.io', 'user': 'svc_billing', 'password': 'Tr0ub4dor&3'} gives a timeout. How do I debug it?", "sensitive": ["prod-db.internal.acme.io", "svc_billing", "Tr0ub4dor&3"], "keep": ["timeout", "debug"]}
+{"category": "code", "prompt": "Write a Python function that validates email addresses using a regular expression.", "sensitive": [], "keep": ["Python", "function", "email", "regular expression"]}
+{"category": "code", "prompt": "In pandas, how do I group a DataFrame by two columns and compute the mean of a third?", "sensitive": [], "keep": ["pandas", "DataFrame", "mean"]}
+{"category": "finance", "prompt": "Use this test card number 4111 1111 1111 1111 for the payment form.", "sensitive": ["4111 1111 1111 1111"], "keep": ["payment form"]}
+{"category": "finance", "prompt": "My IBAN is GB82 WEST 1234 5698 7654 32 and the transfer to Lukas Becker failed. What went wrong?", "sensitive": ["GB82 WEST 1234 5698 7654 32", "Lukas Becker"], "keep": ["transfer", "failed"]}
+{"category": "finance", "prompt": "My SSN is 123-45-6789 and I earned $85,000 last year. Which tax bracket am I in?", "sensitive": ["123-45-6789"], "keep": ["tax bracket", "85,000"]}
+{"category": "finance", "prompt": "Rohan Mehta's PAN is ABCPM1234F. Can he file ITR-2 online if he has capital gains?", "sensitive": ["Rohan Mehta", "ABCPM1234F"], "keep": ["ITR-2", "capital gains"]}
+{"category": "finance", "prompt": "Account number 00123456789 at First Valley Bank was charged twice. How do I dispute it?", "sensitive": ["00123456789"], "keep": ["charged twice", "dispute"]}
+{"category": "contact", "prompt": "Please call me at +91 98765 43210 about my appointment tomorrow.", "sensitive": ["+91 98765 43210"], "keep": ["appointment", "tomorrow"]}
+{"category": "contact", "prompt": "Send the report to patient.records@example.org.", "sensitive": ["patient.records@example.org"], "keep": ["report"]}
+{"category": "contact", "prompt": "Hi, this is Daniel Okafor from Lagos. Can you help me write a cover letter for a nursing job?", "sensitive": ["Daniel Okafor", "Lagos"], "keep": ["cover letter", "nursing job"]}
+{"category": "contact", "prompt": "Draft an email to Mr. Tanaka confirming our meeting on 2024-11-08 at the Osaka office.", "sensitive": ["Tanaka", "2024-11-08", "Osaka"], "keep": ["email", "meeting"]}
+{"category": "contact", "prompt": "I live in Bengaluru and my landlord Suresh Iyer refuses to return my deposit. What are my rights?", "sensitive": ["Bengaluru", "Suresh Iyer"], "keep": ["landlord", "deposit", "rights"]}
+{"category": "contact", "prompt": "My username is kx_gamer_92 and my password is bluefish77. Why can't I log in to the forum?", "sensitive": ["kx_gamer_92", "bluefish77"], "keep": ["log in", "forum"]}
+{"category": "contact", "prompt": "Write a birthday message for my wife Ananya, who turns 30 on 14 February.", "sensitive": ["Ananya", "14 February"], "keep": ["birthday message", "30"]}
+{"category": "contact", "prompt": "My Aadhaar number is 2345 6789 0124 and the portal rejects it. What should I do?", "sensitive": ["2345 6789 0124"],"keep": ["portal"]}
+{"category": "contact", "prompt": "Summarize this chat: Tom said he will meet Linda at Central Park at 5 pm, and Linda agreed.", "sensitive": ["Tom", "Linda"], "keep": ["Summarize", "5 pm"]}
+{"category": "contact", "prompt": "My MAC address is 3C:22:FB:9A:1B:7E and the router keeps blocking it.", "sensitive": ["3C:22:FB:9A:1B:7E"], "keep": ["router", "blocking"]}
+{"category": "contact", "prompt": "I work at Infosys in Pune under manager Kavita Rao. How do I ask for a transfer?", "sensitive": ["Kavita Rao", "Pune", "Infosys"], "keep": ["transfer", "manager"]}
+{"category": "contact", "prompt": "Estrella Garcia emailed me from estrella.g@gmail.com asking about the invoice. Please draft a reply to Estrella.", "sensitive": ["Estrella Garcia", "estrella.g@gmail.com", "Estrella"], "keep": ["invoice", "reply"]}
+{"category": "benign", "prompt": "I have had a headache and sore throat for two days.", "sensitive": [], "keep": ["headache", "sore throat", "two days"]}
+{"category": "benign", "prompt": "What are safe home-care steps for a mild fever?", "sensitive": [], "keep": ["home-care", "mild fever"]}
+{"category": "benign", "prompt": "Explain the difference between a virus and a bacterium in simple terms.", "sensitive": [], "keep": ["virus", "bacterium"]}
+{"category": "benign", "prompt": "How many grams of protein should an adult eat per day?", "sensitive": [], "keep": ["protein", "grams", "adult"]}
+{"category": "benign", "prompt": "Translate 'good morning' into French and Spanish.", "sensitive": [], "keep": ["good morning", "French", "Spanish"]}
+{"category": "benign", "prompt": "What causes dyspnea in patients with chronic obstructive pulmonary disease?", "sensitive": [], "keep": ["dyspnea", "chronic obstructive pulmonary disease"]}
+{"category": "benign", "prompt": "Give me a recipe for a vegetarian lasagna that serves four people.", "sensitive": [], "keep": ["vegetarian lasagna", "four"]}
+{"category": "benign", "prompt": "Is it safe to take paracetamol and ibuprofen together for back pain?", "sensitive": [], "keep": ["paracetamol", "ibuprofen", "back pain"]}
+{"category": "benign", "prompt": "Summarize the causes of the French Revolution in three bullet points.", "sensitive": [], "keep": ["French Revolution", "three bullet points"]}
+{"category": "benign", "prompt": "My dog keeps scratching his ears. Could it be an ear infection?", "sensitive": [], "keep": ["dog", "scratching", "ear infection"]}

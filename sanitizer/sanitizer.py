@@ -1,249 +1,230 @@
 import re
-from dataclasses import replace
-from typing import List, Optional, Dict, Any
+from typing import Any, Dict, List, Optional
 
 from .config import SanitizerConfig
-from .importance import ImportanceCalculator
+from .nltk_resources import pos_tag
+from .pii import find_pii
 from .privacy import PrivacyCalculator
-from .replacement import ReplacementGenerator
 from .selector import WordSelector
+from .surrogates import SurrogateGenerator, match_case
 from .tokenizer import extract_words
-from .types import SanitizationResult, WordScore
-from .pii import find_pii, get_fake_replacement
-from .model_registry import get_causal_model_and_tokenizer
-from .evaluator import PromptEvaluator
+from .types import SanitizationResult
+
+_ENTITY_KINDS = ("PERSON", "LOCATION", "ORGANIZATION")
+
+
+class SanitizationSession:
+    """State shared by the turns of one conversation.
+
+    Keeps surrogates consistent (the same person is "Alex" in every turn) and
+    remembers what was hidden, so an entity sanitized in turn 1 is also hidden
+    in turn 5 even when turn 5 alone would not flag it.
+    """
+
+    def __init__(self, style: str = "realistic", seed: Optional[int] = 42):
+        self.surrogates = SurrogateGenerator(style=style, secret=f"prosan-{seed}")
+        self.contextual: Dict[str, str] = {}   # lower-cased original -> replacement
+        self.history: List[str] = []
+
+    @property
+    def mapping(self) -> Dict[str, str]:
+        return self.surrogates.mapping
 
 
 class PromptSanitizer:
     """
-    ProSan Prompt Privacy Sanitizer (IEEE TIFS 2026).
+    ProSan Prompt Privacy Sanitizer (IEEE TIFS 2026) — Enhanced ("ProSan+").
+
+    Pipeline (all offsets refer to the original prompt):
+      1. Validated recognizers + context rules + NER find explicit PII and secrets.
+      2. One causal-LM pass scores every remaining word for utility (K_w) and
+         self-information; a specificity prior turns that into calibrated risk O_w.
+      3. Entity-level adaptive selection under the gamma_q budget.
+      4. Masked-LM replacement with Eq. 9 re-scoring (or placeholders).
+      5. Consistent surrogates for everything, applied in a single pass,
+         with a mapping that can restore the LLM's answer.
     """
 
     def __init__(self, config: Optional[SanitizerConfig] = None):
         self.config = config or SanitizerConfig.load_from_yaml()
+        self._analyzer = None
+        self._replacer = None
+        self._evaluator = None
+        self.selector = WordSelector()
+        self.privacy = PrivacyCalculator()
+        if self.config.mode == "prosan":
+            self._load_prosan_components()
 
-        self.importance = None
-        self.privacy = None
-        self.selector = None
-        self.replacement = None
-        self.evaluator = None
-        self._load_prosan_components()
-
+    # ── lazy components ─────────────────────────────────────────
     def _load_prosan_components(self) -> None:
-        if self.importance is not None:
+        if self._analyzer is not None:
             return
+        from .causal import CausalAnalyzer
+        from .model_registry import get_causal_model_and_tokenizer
 
-        causal_model_obj, causal_tokenizer_obj = get_causal_model_and_tokenizer(
-            self.config.causal_model, self.config.device
-        )
+        model, tokenizer = get_causal_model_and_tokenizer(self.config.causal_model, self.config.device)
+        self._analyzer = CausalAnalyzer(model_obj=model, tokenizer_obj=tokenizer,
+                                        importance_method=self.config.importance_method)
 
-        self.importance = ImportanceCalculator(
-            model_name=self.config.causal_model,
-            device=self.config.device,
-            model_obj=causal_model_obj,
-            tokenizer_obj=causal_tokenizer_obj,
-        )
+    def _get_replacer(self, cfg: SanitizerConfig):
+        if self._replacer is None:
+            from .replacement import ReplacementGenerator
 
-        self.privacy = PrivacyCalculator(
-            model_name=self.config.causal_model,
-            device=self.config.device,
-            model_obj=causal_model_obj,
-            tokenizer_obj=causal_tokenizer_obj,
-        )
+            self._replacer = ReplacementGenerator(model_name=cfg.mask_model, device=cfg.device, seed=cfg.seed)
+        self._replacer.top_k, self._replacer.eta, self._replacer.tau = cfg.top_k, cfg.eta, cfg.tau
+        self._replacer.sampling_mode, self._replacer.seed = cfg.sampling_mode, cfg.seed
+        return self._replacer
 
-        self.evaluator = PromptEvaluator(
-            model_name=self.config.causal_model,
-            device=self.config.device,
-            model_obj=causal_model_obj,
-            tokenizer_obj=causal_tokenizer_obj,
-        )
+    @property
+    def evaluator(self):
+        if self._evaluator is None:
+            from .evaluator import PromptEvaluator
 
-        self.selector = WordSelector(
-            self.config.lambda_scale,
-            self.config.min_privacy,
-            self.config.max_importance,
-            self.config.pos_filter_enabled,
-        )
+            self._evaluator = PromptEvaluator(model_name=self.config.causal_model, device=self.config.device)
+        return self._evaluator
 
-        self.replacement = ReplacementGenerator(
-            model_name=self.config.mask_model,
-            top_k=self.config.top_k,
-            eta=self.config.eta,
-            tau=self.config.tau,
-            sampling_mode=self.config.sampling_mode,
-            device=self.config.device,
-            seed=self.config.seed,
-        )
+    def new_session(self, config: Optional[SanitizerConfig] = None) -> SanitizationSession:
+        cfg = config or self.config
+        return SanitizationSession(style=cfg.surrogate_style, seed=cfg.seed)
 
-    def _redact_pii_spans(self, prompt: str) -> (str, List[Dict[str, Any]]):
-        spans = find_pii(prompt)
-        if not spans:
-            return prompt, []
-
-        text = prompt
-        selected = []
-        for span in reversed(spans):
-            original = prompt[span.start:span.end]
-            # Use realistic fake value instead of raw <TAG> placeholder
-            replacement = get_fake_replacement(span.kind, seed_text=original)
-            text = text[:span.start] + replacement + text[span.end:]
-            selected.append({
-                "word": original,
-                "start": span.start,
-                "end": span.end,
-                "importance": 0.0,
-                "privacy": 1.0,
-                "raw_privacy": 12.0,
-                "pos_tag": f"PII:{span.kind}",
-                "replacement": replacement,
-            })
-        selected.reverse()
-        return text, selected
-
+    # ── main entry point ────────────────────────────────────────
     def sanitize(
         self,
         prompt: str,
         history: Optional[List[str]] = None,
         config_overrides: Optional[Dict[str, Any]] = None,
         evaluate: bool = True,
+        session: Optional[SanitizationSession] = None,
     ) -> SanitizationResult:
         if not prompt or not prompt.strip():
-            return SanitizationResult(
-                text=prompt,
-                selected_words=[],
-                H_q=0.0,
-                gamma_q=0.0,
-            )
+            return SanitizationResult(text=prompt, selected_words=[])
 
-        if config_overrides:
-            unknown = set(config_overrides) - set(self.config.__dataclass_fields__)
-            if unknown:
-                raise ValueError(f"Unknown configuration override(s): {', '.join(sorted(unknown))}")
-            effective_config = replace(self.config, **config_overrides)
-        else:
-            effective_config = self.config
+        cfg = self.config.with_overrides(config_overrides) if config_overrides else self.config
+        session = session or self.new_session(cfg)
+        history = list(history or session.history)
 
+        # Step 1: explicit PII, secrets and named entities.
+        spans = find_pii(
+            prompt, ner_backend=cfg.ner_backend, ner_model=cfg.ner_model,
+            ner_threshold=cfg.ner_threshold, ner_labels=cfg.ner_labels,
+            propagate=cfg.propagate_entities, device=cfg.device,
+        )
+        edits: List[Dict[str, Any]] = []
+        # Longest mentions first, so "Rahul" inherits the surrogate of "Rahul Sharma".
+        for span in sorted(spans, key=lambda s: -len(prompt[s.start:s.end].split())):
+            original = prompt[span.start:span.end]
+            edits.append(self._edit(span.start, span.end, original,
+                                    session.surrogates.get(span.kind, original),
+                                    pos_tag=f"PII:{span.kind}", source=span.source))
+
+        def free(start: int, end: int) -> bool:
+            return all(end <= e["start"] or start >= e["end"] for e in edits)
+
+        words = [w for w in extract_words(prompt) if free(w["start"], w["end"])]
+
+        # Entities hidden in earlier turns stay hidden, with the same surrogate.
+        remembered = []
+        for w in words:
+            key = w["word"].lower()
+            earlier = session.contextual.get(key)
+            if earlier is None:
+                earlier = next((session.surrogates.lookup(k, w["word"]) for k in _ENTITY_KINDS
+                                if session.surrogates.lookup(k, w["word"])), None)
+            if earlier is not None:
+                remembered.append(w)
+                edits.append(self._edit(w["start"], w["end"], w["word"], match_case(w["word"], earlier),
+                                        pos_tag="MEMORY", source="session"))
+        words = [w for w in words if w not in remembered]
+
+        H_q = gamma_q = 0.0
+        if cfg.mode == "prosan" and words:
+            H_q, gamma_q = self._contextual(prompt, words, history, cfg, session, edits)
+
+        # Step 5: apply every edit right-to-left on the original prompt.
+        edits.sort(key=lambda e: e["start"])
+        text = prompt
+        for edit in reversed(edits):
+            text = text[:edit["start"]] + edit["replacement"] + text[edit["end"]:]
+        session.history = history + [text]
+
+        result = SanitizationResult(
+            text=text, selected_words=edits, H_q=round(H_q, 4), gamma_q=round(gamma_q, 4),
+            mapping=session.mapping,
+        )
+        if evaluate:
+            from .evaluator import PromptEvaluator
+
+            result.original_perplexity, result.perplexity = self.evaluator.perplexity_batch([prompt, text])
+            result.phr = PromptEvaluator.calculate_phr([e["word"] for e in edits], text)["phr"]
+        return result
+
+    def _contextual(self, prompt, words, history, cfg, session, edits):
+        """Steps 2-4: score, select and replace words that no recognizer flagged."""
         self._load_prosan_components()
-        self.selector.lambda_scale = effective_config.lambda_scale
-        self.selector.min_privacy = effective_config.min_privacy
-        self.selector.max_importance = effective_config.max_importance
-        self.selector.pos_filter_enabled = effective_config.pos_filter_enabled
-        self.replacement.eta = effective_config.eta
-        self.replacement.tau = effective_config.tau
-        self.replacement.sampling_mode = effective_config.sampling_mode
+        self._analyzer.importance_method = cfg.importance_method
 
-        # Step 1: PII Pattern Redaction
-        current_text, pii_selected = self._redact_pii_spans(prompt)
+        prefix = ("\n".join(history) + "\n") if history else ""
+        importance, bits = self._analyzer.word_scores(prefix + prompt, words, offset=len(prefix))
+        tags = pos_tag([w["word"] for w in words])
 
-        # Step 2: ProSan Contextual Model Desensitization
-        raw_words = extract_words(current_text)
+        self.privacy.saturation = cfg.privacy_saturation
+        privacy, raw = self.privacy.calculate(prompt, words, bits, tags)
 
-        # Build ranges of fake-value replacements in the current (post-PII) text
-        # so the model pipeline doesn't re-process them.
-        pii_replacement_ranges = []
-        offset = 0
-        for item in pii_selected:
-            orig_len = item["end"] - item["start"]
-            repl_len = len(item["replacement"])
-            new_start = item["start"] + offset
-            new_end = new_start + repl_len
-            pii_replacement_ranges.append((new_start, new_end))
-            offset += repl_len - orig_len
+        self.selector.lambda_scale, self.selector.min_privacy = cfg.lambda_scale, cfg.min_privacy
+        self.selector.max_importance, self.selector.pos_filter_enabled = cfg.max_importance, cfg.pos_filter_enabled
+        units, H_q, gamma_q = self.selector.select(words, importance, privacy, raw, tags, full_text=prompt)
+        if not units:
+            return H_q, gamma_q
 
-        def is_in_pii_replacement(w):
-            for p_start, p_end in pii_replacement_ranges:
-                if w["start"] >= p_start and w["end"] <= p_end:
-                    return True
-            return False
+        if cfg.surrogate_style == "realistic":
+            forbidden = [e["word"] for e in edits]
+            self._get_replacer(cfg).replace(prompt, units, forbidden)
 
-        words = [w for w in raw_words if not is_in_pii_replacement(w)]
+        for unit in units:
+            replacement = unit.replacement
+            if not replacement or cfg.surrogate_style == "placeholder":
+                kind = ("ID_NUMBER" if any(c.isdigit() for c in unit.text)
+                        else "PERSON" if unit.text[:1].isupper() and cfg.surrogate_style == "realistic"
+                        else "SENSITIVE")
+                replacement = session.surrogates.get(kind, unit.text)
+            else:
+                session.surrogates.register("CONTEXTUAL", unit.text, replacement)
+            session.contextual[unit.text.lower()] = replacement
 
-        orig_ppl = None  # Computed at end via batched call
+            for start, end in unit.occurrences:
+                original = prompt[start:end]
+                members = [m for m in unit.members if start <= m.start < end]
+                edits.append(self._edit(
+                    start, end, original, match_case(original, replacement),
+                    importance=max(m.importance for m in members),
+                    privacy=max(m.privacy for m in members),
+                    raw_privacy=sum(m.raw_privacy for m in members),
+                    pos_tag=members[0].pos_tag, source="contextual",
+                ))
+        return H_q, gamma_q
 
-        if not words:
-            ppls = self.evaluator.perplexity_batch([prompt, current_text]) if self.evaluator and evaluate else [None, None]
-            return SanitizationResult(
-                text=current_text,
-                selected_words=pii_selected,
-                H_q=0.0,
-                gamma_q=0.0,
-                perplexity=ppls[1],
-                original_perplexity=ppls[0],
-            )
+    @staticmethod
+    def _edit(start, end, word, replacement, importance=0.0, privacy=1.0, raw_privacy=0.0,
+              pos_tag="", source="pattern") -> Dict[str, Any]:
+        return {
+            "word": word, "start": start, "end": end,
+            "importance": round(importance, 4), "privacy": round(privacy, 4),
+            "raw_privacy": round(raw_privacy, 4), "pos_tag": pos_tag,
+            "replacement": replacement, "source": source,
+        }
 
-        # Section VII-B: Multi-turn prompt context
-        if history:
-            full_context = "\n".join(history) + "\n" + current_text
-            offset = len("\n".join(history)) + 1
-            context_words = extract_words(full_context)
-            eval_text = full_context
-            eval_words = [w for w in context_words if w["start"] >= offset and not is_in_pii_replacement({"start": w["start"] - offset, "end": w["end"] - offset})]
-            importance_scores = self.importance.calculate(eval_text, eval_words)
-            privacy_norm, privacy_raw = self.privacy.calculate(eval_text, eval_words)
-        else:
-            eval_text = current_text
-            eval_words = words
-            importance_scores = self.importance.calculate(eval_text, eval_words)
-            privacy_norm, privacy_raw = self.privacy.calculate(eval_text, eval_words)
+    def sanitize_batch(self, prompts: List[str], **kwargs) -> List[SanitizationResult]:
+        return [self.sanitize(p, **kwargs) for p in prompts]
 
-        selected_scores, H_q, gamma_q = self.selector.select(
-            words,
-            importance_scores,
-            privacy_norm,
-            privacy_raw,
-            full_text=current_text,
-        )
-
-        if not selected_scores:
-            ppls = self.evaluator.perplexity_batch([prompt, current_text]) if self.evaluator and evaluate else [None, None]
-            return SanitizationResult(
-                text=current_text,
-                selected_words=pii_selected,
-                H_q=round(H_q, 4),
-                gamma_q=round(gamma_q, 4),
-                perplexity=ppls[1],
-                original_perplexity=ppls[0],
-            )
-
-        sanitized_text, desensitized_words = self.replacement.replace(
-            current_text,
-            selected_scores,
-        )
-
-        prosan_selected = [
-            {
-                "word": x.word,
-                "start": x.start,
-                "end": x.end,
-                "importance": round(x.importance, 4),
-                "privacy": round(x.privacy, 4),
-                "raw_privacy": round(x.raw_privacy, 4),
-                "pos_tag": x.pos_tag,
-                "replacement": x.replacement,
-            }
-            for x in desensitized_words
-        ]
-
-        all_selected = pii_selected + prosan_selected
-
-        # Batched evaluation: original + sanitized perplexity in one forward pass
-        phr_val = None
-        orig_ppl = None
-        san_ppl = None
-        if evaluate and self.evaluator:
-            ppls = self.evaluator.perplexity_batch([prompt, sanitized_text])
-            orig_ppl = ppls[0]
-            san_ppl = ppls[1]
-            orig_words = [item["word"] for item in all_selected if item["word"] not in sanitized_text]
-            phr_info = PromptEvaluator.calculate_phr(orig_words, sanitized_text)
-            phr_val = phr_info["phr"]
-
-        return SanitizationResult(
-            text=sanitized_text,
-            selected_words=all_selected,
-            H_q=round(H_q, 4),
-            gamma_q=round(gamma_q, 4),
-            perplexity=san_ppl,
-            original_perplexity=orig_ppl,
-            phr=phr_val,
-        )
+    # ── de-anonymization ────────────────────────────────────────
+    @staticmethod
+    def restore(text: str, mapping: Dict[str, str]) -> str:
+        """Map surrogates in an LLM response back to the original values."""
+        if not mapping or not text:
+            return text
+        keys = sorted(mapping, key=len, reverse=True)
+        pattern = re.compile("|".join(
+            (r"(?<!\w)" if k[:1].isalnum() else "") + re.escape(k) + (r"(?!\w)" if k[-1:].isalnum() else "")
+            for k in keys
+        ))
+        return pattern.sub(lambda m: mapping[m.group(0)], text)

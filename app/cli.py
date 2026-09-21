@@ -1,6 +1,7 @@
 import argparse
 import sys
 import time
+
 from sanitizer import PromptSanitizer, SanitizerConfig
 
 
@@ -13,12 +14,7 @@ def parse_args():
         nargs="*",
         help="Prompt text to sanitize (e.g. python -m app.cli 'My name is John')",
     )
-    parser.add_argument(
-        "--file",
-        "-f",
-        type=str,
-        help="Path to file containing prompts (one per line)",
-    )
+    parser.add_argument("--file", "-f", type=str, help="Path to file containing prompts (one per line)")
     parser.add_argument(
         "--history",
         nargs="+",
@@ -28,13 +24,25 @@ def parse_args():
         "--eval",
         action="store_true",
         default=False,
-        help="Enable evaluation metrics (perplexity, PHR). Adds ~30% latency.",
+        help="Enable evaluation metrics (perplexity, PHR). Adds ~30%% latency.",
     )
+    parser.add_argument("--mode", choices=["prosan", "pii_only"], help="Override the configured mode")
+    parser.add_argument("--style", choices=["realistic", "placeholder"], help="Surrogate style")
+    parser.add_argument("--config", default="config/config.yaml", help="YAML configuration file")
+    parser.add_argument("--train", metavar="JSONL", help="Fine-tune a local seq2seq sanitizer on JSONL pairs")
+    parser.add_argument("--output-dir", default="models/local-sanitizer", help="Where --train saves the model")
+    parser.add_argument("--local-model", metavar="DIR", help="Sanitize with a fine-tuned local seq2seq model")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+
+    if args.train:
+        from sanitizer.seq2seq import train_seq2seq
+
+        print(f"Saved local sanitizer to {train_seq2seq(args.train, args.output_dir)}")
+        return
 
     prompts = []
     if args.file:
@@ -51,9 +59,19 @@ def main():
         print("Error: No prompt provided.")
         sys.exit(1)
 
+    if args.local_model:
+        from sanitizer.seq2seq import LocalSeq2SeqSanitizer
+
+        local = LocalSeq2SeqSanitizer(args.local_model)
+        for prompt in prompts:
+            print(local.sanitize(prompt))
+        return
+
     t0 = time.time()
-    config = SanitizerConfig.load_from_yaml()
+    overrides = {k: v for k, v in (("mode", args.mode), ("surrogate_style", args.style)) if v}
+    config = SanitizerConfig.load_from_yaml(args.config).with_overrides(overrides)
     sanitizer = PromptSanitizer(config=config)
+    session = sanitizer.new_session()
     t_model_load = time.time() - t0
 
     print("\n" + "=" * 80)
@@ -65,7 +83,7 @@ def main():
             print(f"\n--- Prompt [{idx}/{len(prompts)}] ---")
 
         t_start = time.time()
-        result = sanitizer.sanitize(prompt, history=args.history, evaluate=args.eval)
+        result = sanitizer.sanitize(prompt, history=args.history, evaluate=args.eval, session=session)
         t_infer = time.time() - t_start
 
         print("\nOriginal Prompt:")
@@ -75,7 +93,7 @@ def main():
         print(f"  {result.text}")
 
         if args.eval:
-            print(f"\nPrompt Privacy & Readability Evaluation:")
+            print("\nPrompt Privacy & Readability Evaluation:")
             print(f"  Average Self-Information (H_q) : {result.H_q:.4f} bits")
             print(f"  Dynamic Protection Ratio (gamma_q): {result.gamma_q:.4f}")
             if result.original_perplexity is not None:
@@ -84,29 +102,28 @@ def main():
                 print(f"  Sanitized Perplexity (PPL)   : {result.perplexity:.4f}")
             if result.phr is not None:
                 print(f"  Privacy Hiding Rate (PHR)    : {result.phr:.2f}%")
-        print(f"  GPU Inference Latency        : {t_infer:.3f} seconds")
+        print(f"  Inference Latency            : {t_infer:.3f} seconds")
 
         print("\nDesensitized Word Spans:")
         if not result.selected_words:
             print("  (No sensitive words or PII detected)")
         else:
             print(
-                f"  {'Original':<18} -> {'Replacement':<16} | "
-                f"{'POS':<10} | {'Utility K_w':<11} | {'Privacy O_w':<11} | {'Self-Info I_w':<12}"
+                f"  {'Original':<22} -> {'Replacement':<22} | "
+                f"{'Type':<16} | {'Utility K_w':<11} | {'Privacy O_w':<11} | {'Self-Info I_w':<12}"
             )
-            print("  " + "-" * 88)
+            print("  " + "-" * 110)
             for item in result.selected_words:
-                rep = item.get("replacement") or "N/A"
                 print(
-                    f"  {item['word']!r:<18} -> {rep!r:<16} | "
-                    f"{item['pos_tag']:<10} | "
+                    f"  {item['word']!r:<22} -> {item['replacement']!r:<22} | "
+                    f"{item['pos_tag']:<16} | "
                     f"{item['importance']:<11.3f} | "
                     f"{item['privacy']:<11.3f} | "
-                    f"{item['raw_privacy']:<12.3f} bits"
+                    f"{item['raw_privacy']:<8.3f} bits"
                 )
 
     print("\n" + "=" * 80)
-    print(f"Total time (Model Load: {t_model_load:.2f}s | Device: {config.device.upper()})")
+    print(f"Total time (Model Load: {t_model_load:.2f}s | Mode: {config.mode} | Device: {config.device.upper()})")
 
 
 if __name__ == "__main__":

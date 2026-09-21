@@ -1,96 +1,94 @@
-import torch
-from .model_registry import get_causal_model_and_tokenizer
+"""Calibrated privacy risk O_w (Section IV-B, VII-A) — Enhanced.
+
+The paper min-max normalises self-information inside each prompt, which
+guarantees that *some* word in every prompt scores 1.0: harmless prompts such
+as "I have a fever" still get a word rewritten, and rare-but-public terms
+("dyspnea") look as private as a name.
+
+Here risk is absolute and combines two independent signals:
+
+    O_w = prior(w) * (1 - exp(-I_w / kappa))
+
+* ``1 - exp(-I/kappa)`` maps surprisal in bits onto [0, 1) without looking at
+  the other words in the prompt, so the threshold means the same thing for
+  every input.
+* ``prior(w)`` is a *specificity* prior from the word's form: a capitalised
+  non-initial token that is not a dictionary word ("Estrella") is very likely
+  identifying; a lower-case dictionary word ("fever", "dyspnea") is not, no
+  matter how surprising.
+
+Repeated mentions are max-pooled (Section VII-A): a name's later mentions are
+predictable from the first, but they are exactly as private.
+"""
+
+import math
+import re
+from typing import Dict, List, Sequence, Tuple
+
+from .nltk_resources import is_dictionary_word
+
+def is_sentence_initial(text: str, start: int) -> bool:
+    """True when only whitespace/quotes/brackets separate ``start`` from a sentence boundary."""
+    before = text[:start].rstrip(" \t\"'“‘([")
+    return not before or before[-1] in ".!?:\n"
+
+
+_VERSIONED_NAME_RE = re.compile(r"^[A-Za-z]{3,}[0-9]{1,2}$")  # boto3, gpt4, oauth2, web3, python3
+
+
+def privacy_prior(word: str, pos_tag: str, sentence_initial: bool) -> float:
+    digits = sum(ch.isdigit() for ch in word)
+    if digits:
+        if _VERSIONED_NAME_RE.match(word):
+            return 0.2   # a library/format name with a trailing version digit, not an identifier
+        # Mixed alphanumerics and long numbers identify; "2" or "10" rarely do.
+        return 0.9 if (digits >= 4 or digits < len(word)) else 0.4
+    if word.isupper() and len(word) > 1:
+        return 0.35          # acronyms: ICU, MRI, API
+    if word[:1].isupper():
+        in_dict = is_dictionary_word(word)
+        if sentence_initial:
+            # Capitalisation here is English orthography, not identity evidence.
+            # POS taggers routinely mistag a sentence-initial verb/noun as NNP
+            # ("Translate this" -> NNP); a genuine dictionary word should score
+            # the same regardless of that mistag, so only an unrecognised token
+            # ("Estrella opened...") is treated as a likely name.
+            return 0.15 if in_dict else 0.85
+        return 0.8 if in_dict else 1.0
+    if is_dictionary_word(word):
+        if pos_tag.startswith("NN"):
+            return 0.3
+        if pos_tag.startswith("CD"):
+            return 0.4
+        return 0.2
+    return 0.7               # unknown lower-case token: handle, username, rare surname
+
+
+def surprisal_risk(bits: float, saturation: float) -> float:
+    return 1.0 - math.exp(-max(bits, 0.0) / max(saturation, 1e-6))
 
 
 class PrivacyCalculator:
-    """
-    ProSan Contextual Privacy Calculator (Section IV-B & VII-A).
+    def __init__(self, saturation: float = 8.0):
+        self.saturation = saturation
 
-    Calculates self-information:
-        I(t_i) = -log2 P(t_i | previous tokens)
+    def calculate(self, text: str, words: List[Dict], bits: Sequence[float],
+                  pos_tags: Sequence[str]) -> Tuple[List[float], List[float]]:
+        """Return (O_w in [0, 1], pooled self-information bits) for each word."""
+        pooled_bits: Dict[str, float] = {}
+        for word, b in zip(words, bits):
+            key = word["word"].lower()
+            pooled_bits[key] = max(pooled_bits.get(key, 0.0), b)
 
-    Includes repeated entity max-pooling (Section VII-A).
-    """
-
-    def __init__(self, model_name="distilgpt2", device="auto", model_obj=None, tokenizer_obj=None):
-        if model_obj is not None and tokenizer_obj is not None:
-            self.model = model_obj
-            self.tokenizer = tokenizer_obj
-            self.device = next(self.model.parameters()).device
-        else:
-            self.model, self.tokenizer = get_causal_model_and_tokenizer(model_name, device)
-            self.device = next(self.model.parameters()).device
-
-    @torch.no_grad()
-    def token_information(self, text: str):
-        encoded = self.tokenizer(
-            text,
-            return_tensors="pt",
-            return_offsets_mapping=True,
-            add_special_tokens=False,
-        )
-
-        input_ids = encoded["input_ids"].to(self.device)
-
-        outputs = self.model(input_ids=input_ids)
-        logits = outputs.logits[:, :-1, :]
-        targets = input_ids[:, 1:]
-
-        log_probs = torch.log_softmax(logits.float(), dim=-1)
-        token_log_probs = log_probs.gather(
-            2, targets.unsqueeze(-1)
-        ).squeeze(-1)
-
-        info = -token_log_probs / torch.log(torch.tensor(2.0, device=self.device))
-
-        info = torch.cat(
-            [torch.zeros((1, 1), device=self.device), info],
-            dim=1,
-        )
-
-        return (
-            info.squeeze(0).cpu().tolist(),
-            encoded["offset_mapping"].squeeze(0).cpu().tolist(),
-        )
-
-    def calculate(self, text: str, words):
-        if not words:
-            return [], []
-
-        token_info, offsets = self.token_information(text)
-
-        raw_scores = []
-        for word in words:
-            total = 0.0
-            for i, (start, end) in enumerate(offsets):
-                if end <= word["start"] or start >= word["end"]:
-                    continue
-                total += token_info[i]
-
-            raw_scores.append(total)
-
-        word_max_privacy = {}
-        for i, word in enumerate(words):
-            w_lower = word["word"].lower()
-            if w_lower not in word_max_privacy or raw_scores[i] > word_max_privacy[w_lower]:
-                word_max_privacy[w_lower] = raw_scores[i]
-
-        pooled_raw_scores = [
-            word_max_privacy[w["word"].lower()] for w in words
-        ]
-
-        normalized = normalize(pooled_raw_scores)
-        return normalized, pooled_raw_scores
-
-
-def normalize(values):
-    if not values:
-        return []
-
-    lo = min(values)
-    hi = max(values)
-
-    if hi == lo:
-        return [0.0 for _ in values]
-
-    return [(x - lo) / (hi - lo) for x in values]
+        risk, raw = [], []
+        pooled_risk: Dict[str, float] = {}
+        for word, tag in zip(words, pos_tags):
+            key = word["word"].lower()
+            b = pooled_bits[key]
+            prior = privacy_prior(word["word"], tag, is_sentence_initial(text, word["start"]))
+            o = prior * surprisal_risk(b, self.saturation)
+            pooled_risk[key] = max(pooled_risk.get(key, 0.0), o)
+            raw.append(b)
+            risk.append(o)
+        # A word is as private as its most identifying mention.
+        return [pooled_risk[w["word"].lower()] for w in words], raw

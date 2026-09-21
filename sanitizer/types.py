@@ -23,3 +23,5 @@ class SanitizationResult:
     perplexity: Optional[float] = None
     original_perplexity: Optional[float] = None
     phr: Optional[float] = None
+    # surrogate -> original, for restoring an LLM response (see PromptSanitizer.restore)
+    mapping: Dict[str, str] = field(default_factory=dict)
