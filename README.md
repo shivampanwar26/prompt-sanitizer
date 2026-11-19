@@ -1,8 +1,23 @@
-# ProSan — Utility-Based Prompt Privacy Sanitizer
+# ProSan+ — Utility-Based Prompt Privacy Sanitizer
 
-A clean, unified implementation of the ProSan prompt-sanitization pipeline described in *"ProSan: Utility-Based Prompt Privacy Sanitizer"* (IEEE TIFS 2026).
+Detects and desensitizes personal, secret and identifying information in a prompt before it
+reaches an LLM — while keeping the words the task actually depends on. Inspired by
+*"ProSan: Utility-Based Prompt Privacy Sanitizer"* (IEEE TIFS 2026), with a rewritten detection,
+scoring and replacement pipeline (see [What changed](#what-changed-vs-the-paper--the-first-implementation) below).
 
-## Pipeline Workflow
+```python
+from sanitizer import PromptSanitizer
+
+s = PromptSanitizer()
+session = s.new_session()                                    # keeps surrogates consistent across turns
+r = s.sanitize("My name is Rahul Sharma, call +91 98765 43210", session=session)
+print(r.text)                                                 # -> "My name is Jordan Dalton, call +91 28683 61200"
+
+answer = call_your_llm(r.text)
+print(PromptSanitizer.restore(answer, r.mapping))             # real name/number back in the answer
+```
+
+## Pipeline
 
 ```
 Original Prompt
@@ -18,7 +33,213 @@ Original Prompt
   └─► Sanitized Prompt + mapping (restore the LLM's answer with PromptSanitizer.restore)
 ```
 
-## What changed vs. the paper / the first implementation (ProSan+)
+Two independent layers, both always active in `mode: prosan`:
+
+1. **Pattern/context/NER layer** (`sanitizer/pii.py`) — high-confidence, deterministic. Catches
+   emails, phones, cards, IBANs, SSNs, Aadhaar, PAN, IPs/MACs, API keys, secrets and credentials in
+   code, dates, addresses, IDs, and named people/places/organizations. Every mention of a caught
+   entity is propagated and hidden, not just the first.
+2. **Contextual layer** (`sanitizer/causal.py`, `privacy.py`, `selector.py`, `replacement.py`) —
+   catches whatever the first layer misses, using a causal LM to score self-information and
+   utility importance per word, an absolute calibrated privacy-risk score, and a masked LM to
+   generate a fluent, non-identifying replacement.
+
+Set `mode: pii_only` to run only the first layer — no language models are loaded, detection is
+deterministic, and it's fast enough for CI or high-throughput pipelines.
+
+## Project layout
+
+```
+sanitizer/          core library (see "Pipeline" above for the module-to-stage mapping)
+  pii.py              recognizers, context rules, NER, entity propagation
+  causal.py           shared causal-LM pass: self-information + attention importance
+  privacy.py          calibrated privacy-risk scoring
+  selector.py         entity-level adaptive word selection
+  replacement.py      batched masked-LM replacement generation
+  surrogates.py       deterministic, format-preserving fake values
+  sanitizer.py        PromptSanitizer / SanitizationSession — the orchestrator
+  evaluator.py        perplexity, PHR, utility-retention metrics
+  config.py           SanitizerConfig (YAML + per-call overrides)
+  dataset.py          builds (original, sanitized) JSONL pairs for seq2seq fine-tuning
+  seq2seq.py          fine-tune / run a compact local sanitizer model
+app/
+  main.py             FastAPI app
+  cli.py              command-line interface
+frontend/            React/Vite dashboard (talks to app/main.py)
+tests/               pytest suite (fast + @pytest.mark.models)
+data/benchmark.jsonl gold-labelled prompts used by benchmark.py
+config/config.yaml   default configuration
+```
+
+## Requirements & setup
+
+Python 3.10+.
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate      # Windows
+source .venv/bin/activate   # Linux/macOS
+
+pip install -r requirements.txt
+```
+
+Models downloaded on first run (cached under `~/.cache/huggingface`):
+
+| Model | Used for | Size |
+|---|---|---|
+| `distilgpt2` | self-information & importance scoring | ~330 MB |
+| `roberta-base` | masked-LM replacement candidates | ~500 MB |
+| `dslim/distilbert-NER` | named-entity recognition (set `ner_backend: nltk` or `none` to skip) | ~260 MB |
+
+NLTK resources (`wordnet`, `averaged_perceptron_tagger_eng`, `punkt_tab`, `maxent_ne_chunker_tab`,
+`words`) also auto-download on first use, or pre-fetch them:
+
+```bash
+python -c "import nltk; [nltk.download(r, quiet=True) for r in ['wordnet','averaged_perceptron_tagger_eng','punkt_tab','maxent_ne_chunker_tab','words']]"
+```
+
+`mode: pii_only` skips `distilgpt2`/`roberta-base` entirely; NER model download is skipped by
+setting `ner_backend: none` (or `nltk`, which uses NLTK's bundled chunker instead).
+
+## Running the CLI
+
+```bash
+python -m app.cli "My name is John Doe and my email is john@example.com. I have chest pain."
+```
+
+| Flag | Purpose |
+|---|---|
+| `-f, --file PATH` | sanitize one prompt per line from a file |
+| `--history TURN [TURN ...]` | prior conversation turns, for multi-turn context |
+| `--eval` | print perplexity, H_q, γ_q, and PHR (adds latency) |
+| `--mode {prosan,pii_only}` | override the configured pipeline mode |
+| `--style {realistic,placeholder}` | override the surrogate style |
+| `--config PATH` | use a different YAML config file |
+| `--train JSONL --output-dir DIR` | fine-tune a local seq2seq sanitizer on (original, sanitized) pairs |
+| `--local-model DIR` | sanitize using a fine-tuned local model instead of the full pipeline |
+
+```bash
+python -m app.cli --eval "My name is John Doe and I live in Delhi."
+python -m app.cli -f prompts.txt
+python -m app.cli --history "What is the patient's age?" "45 years old." "Patient John Doe has dyspnea."
+python -m app.cli --mode pii_only "connection = psycopg2.connect(user=Estrella, password=hunter2)"
+python -m app.cli --train data/training.jsonl --output-dir models/local-sanitizer
+python -m app.cli --local-model models/local-sanitizer "Email me@example.com"
+```
+
+## Running the REST API
+
+```bash
+uvicorn app.main:app --reload --port 8000
+```
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /health` | liveness check |
+| `GET /config` | current `SanitizerConfig` |
+| `POST /sanitize` | sanitize a prompt; returns text, per-word detail, `H_q`/`γ_q`, and a `mapping` |
+| `POST /sanitize/batch` | sanitize many prompts into (original, sanitized) training pairs |
+| `POST /restore` | map surrogates in an LLM's reply back to the real values |
+| `POST /evaluate` | perplexity and PHR for an (original, sanitized) pair you already have |
+
+```bash
+curl -X POST http://127.0.0.1:8000/sanitize \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "My name is Alice, email alice@corp.com.", "history": [], "lambda_scale": 0.3}'
+```
+
+`/sanitize` and `/sanitize/batch` accept the same optional overrides as `SanitizerConfig`
+(`mode`, `surrogate_style`, `lambda_scale`, `min_privacy`, `eta`, `tau`, `sampling_mode`) — they
+apply to that request only, without mutating the shared server-side sanitizer.
+
+## Web Dashboard (React/Vite)
+
+```bash
+# Terminal 1: API
+uvicorn app.main:app --port 8000
+
+# Terminal 2: Web UI
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173`. CORS is pre-configured for the Vite dev server origin. Set
+`VITE_API_URL` if the API runs somewhere other than `http://127.0.0.1:8000`.
+
+## Configuration (`config/config.yaml`)
+
+| Key | Meaning |
+|---|---|
+| `mode` | `prosan` (full pipeline) or `pii_only` (pattern/NER layer only, no LLMs loaded) |
+| `surrogate_style` | `realistic` (readable fakes) or `placeholder` (`<PERSON_1>`-style, exactly reversible) |
+| `ner_backend` | `transformer` (best recall), `nltk` (offline fallback), `none` |
+| `lambda_scale` | λ — caps the *share* of words the contextual layer may touch (a budget, not a quota) |
+| `min_privacy` | absolute risk threshold in [0, 1] a word must clear to be considered |
+| `max_importance` | protects words above this utility score from replacement |
+| `privacy_saturation` | κ — bits of self-information at which surprisal risk saturates |
+| `importance_method` | `attention` (1 forward pass, default) or `gradient` (the paper's method, slower) |
+| `eta`, `tau`, `top_k`, `sampling_mode` | replacement generation: Eq. 9 weighting, cumulative truncation, candidate pool size, `sample` vs. `max` |
+| `device` | `auto` / `cpu` / `cuda` |
+| `seed` | seeds surrogate generation and stochastic sampling for reproducibility |
+
+Any of these can also be overridden per call without touching the YAML file or the shared
+instance:
+
+```python
+result = sanitizer.sanitize(prompt, config_overrides={"lambda_scale": 0.5, "surrogate_style": "placeholder"})
+```
+
+## Multi-turn sessions & restoring an LLM's answer
+
+A `SanitizationSession` keeps surrogates consistent across turns (the same person stays "Alex" in
+turn 5 as in turn 1) and remembers what was hidden earlier, so it stays hidden even if a later
+turn alone wouldn't flag it:
+
+```python
+session = sanitizer.new_session()
+r1 = sanitizer.sanitize("My name is Rahul Sharma.", session=session)
+r2 = sanitizer.sanitize("Is Rahul eligible for the scheme?", session=session)  # "Rahul" still hidden
+```
+
+`r.mapping` (surrogate → original) accumulates across the session and can be used to translate an
+LLM's response back into the real values with `PromptSanitizer.restore(text, mapping)`.
+
+## Testing
+
+```bash
+pytest -m "not models"   # fast suite, no downloads, ~10s (48 tests)
+pytest                   # full suite including model-backed tests (53 tests)
+```
+
+## Benchmarking
+
+`data/benchmark.jsonl` is a gold-labelled prompt set (`prompt`, `sensitive` items that must
+disappear, `keep` items the task depends on) spanning medical, code, finance, contact and benign
+categories.
+
+```bash
+python benchmark.py                              # metrics for this checkout
+python benchmark.py --baseline /path/to/other/checkout   # compare against another checkout
+python benchmark.py --show                       # print every sanitized prompt
+```
+
+It reports PHR (sensitive items hidden), utility retention (task-critical words kept), collateral
+damage (non-sensitive words changed anyway), benign-prompt integrity (PII-free prompts left
+untouched), sanitized/original perplexity ratio, and per-prompt latency.
+
+Result vs. the original starter implementation (45 prompts, CPU, `distilgpt2`/`roberta-base`):
+
+| Metric | Baseline | ProSan+ |
+|---|---|---|
+| PHR (sensitive items hidden) | 86.7% | **96.7%** |
+| Utility (task-critical words kept) | 81.0% | **98.0%** |
+| Collateral (non-sensitive words changed) | 6.4% | **1.6%** |
+| Benign intact (PII-free prompts left untouched) | 25.0% | **91.7%** |
+| PPL ratio (sanitized/original fluency) | 1.205 | 1.301 |
+| Latency (s/prompt, models warm) | 0.787 | **0.093** |
+
+## What changed vs. the paper / the first implementation
 
 | Problem | Before | Now |
 |---|---|---|
@@ -32,104 +253,12 @@ Original Prompt
 | Fake values change between runs | Python's salted `hash()` | Keyed SHA-256 |
 | PHR always ≈100% | Computed only over words already removed | Gold-labelled benchmark (`data/benchmark.jsonl`) |
 | Card/phone false positives | Regex only | Checksums, context and unit guards |
+| Sentence-initial capitalisation treated as identity | Any capitalised word bypassed importance protection | Sentence-initial capitalisation excluded (English orthography, not identity evidence) |
 
-## Benchmark
+## Known limitations
 
-```bash
-python benchmark.py                    # this checkout
-python benchmark.py --baseline PATH    # compare with another checkout (e.g. the original commit)
-python benchmark.py --show             # print every sanitized prompt
-```
-
-## Modes and styles
-
-* `mode: prosan` (default) runs the full pipeline. `mode: pii_only` never loads the language models.
-* `surrogate_style: realistic` (default) produces readable fakes. `placeholder` produces `<PERSON_1>`-style tags that restore exactly.
-
-```python
-from sanitizer import PromptSanitizer
-
-s = PromptSanitizer()
-session = s.new_session()                       # keeps surrogates consistent across turns
-r = s.sanitize("My name is Rahul Sharma, call +91 98765 43210", session=session)
-answer = call_your_llm(r.text)
-print(s.restore(answer, r.mapping))             # real names/values back in the answer
-```
-
-## Quick Start & Requirements
-
-Python 3.10+ recommended.
-
-```bash
-# Setup Virtual Environment
-python -m venv .venv
-
-# Activate:
-# Linux/macOS: source .venv/bin/activate
-# Windows: .venv\Scripts\activate
-
-pip install -r requirements.txt
-```
-
-Default models loaded on first run:
-- Importance & Privacy Self-Information: `distilgpt2`
-- Candidate Replacement Generator: `roberta-base`
-- Named-entity recognition: `dslim/distilbert-NER` (set `ner_backend: nltk` or `none` to skip it)
-
-Tests: `pytest -m "not models"` runs the fast suite without downloading models. Plain `pytest` runs everything.
-
----
-
-## Running the CLI
-
-Run direct prompt desensitization via the clean CLI:
-
-```bash
-python -m app.cli "My name is John Doe and my email is john@example.com. I live in Delhi and have severe chest pain."
-```
-
-Or pass a file containing prompts (one per line):
-
-```bash
-python -m app.cli -f prompts.txt
-```
-
-Or evaluate readability perplexity ($PPL$):
-
-```bash
-python -m app.cli --eval "My name is John Doe and I live in Delhi."
-```
-
----
-
-## Running the REST API
-
-```bash
-uvicorn app.main:app --reload
-```
-
-Send a POST request to `/sanitize`:
-
-```json
-{
-  "prompt": "My name is John Doe and my email is john@example.com."
-}
-```
-
----
-
-## Web Dashboard (React/Vite)
-
-Start the API and frontend in separate terminals:
-
-```bash
-# Terminal 1: API
-uvicorn app.main:app --port 8000
-
-# Terminal 2: Web UI
-cd frontend
-npm install
-npm run dev
-```
-
-Open `http://localhost:5173` in your web browser.
+* Common medical/drug names absent from WordNet (e.g. "paracetamol") can occasionally be treated
+  as unusual vocabulary and replaced with a synonym. Closing this fully needs a domain term
+  gazetteer rather than a dictionary check.
+* `ner_backend: transformer` adds model latency; use `nltk` or `none` for lower-latency or fully
+  offline deployments at some cost to recall on names/organizations.

@@ -76,7 +76,7 @@ class SelectionUnit:
 
 class WordSelector:
     """
-    ProSan Adaptive Word Selection (Section V-A) — Enhanced.
+    Adaptive Word Selection.
 
     1. H_q = mean self-information; budget gamma_q = lambda * sigmoid(H_q) (Eq. 7).
     2. Eligibility: content words (POS) that are not code tokens, measurement

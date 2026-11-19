@@ -1,6 +1,5 @@
-import re
-from typing import Any, Dict, List, Optional
 
+from typing import Any, Dict, List, Optional
 from .config import SanitizerConfig
 from .nltk_resources import pos_tag
 from .pii import find_pii
@@ -33,9 +32,9 @@ class SanitizationSession:
 
 class PromptSanitizer:
     """
-    ProSan Prompt Privacy Sanitizer (IEEE TIFS 2026) — Enhanced ("ProSan+").
+    Prompt Privacy Sanitizer.
 
-    Pipeline (all offsets refer to the original prompt):
+    Pipeline:
       1. Validated recognizers + context rules + NER find explicit PII and secrets.
       2. One causal-LM pass scores every remaining word for utility (K_w) and
          self-information; a specificity prior turns that into calibrated risk O_w.
@@ -45,17 +44,15 @@ class PromptSanitizer:
          with a mapping that can restore the LLM's answer.
     """
 
-    def __init__(self, config: Optional[SanitizerConfig] = None):
-        self.config = config or SanitizerConfig.load_from_yaml()
+    def __init__(self):
+        self.config = SanitizerConfig()
         self._analyzer = None
         self._replacer = None
         self._evaluator = None
         self.selector = WordSelector()
         self.privacy = PrivacyCalculator()
-        if self.config.mode == "prosan":
-            self._load_prosan_components()
+        self._load_prosan_components()
 
-    # ── lazy components ─────────────────────────────────────────
     def _load_prosan_components(self) -> None:
         if self._analyzer is not None:
             return
@@ -69,7 +66,6 @@ class PromptSanitizer:
     def _get_replacer(self, cfg: SanitizerConfig):
         if self._replacer is None:
             from .replacement import ReplacementGenerator
-
             self._replacer = ReplacementGenerator(model_name=cfg.mask_model, device=cfg.device, seed=cfg.seed)
         self._replacer.top_k, self._replacer.eta, self._replacer.tau = cfg.top_k, cfg.eta, cfg.tau
         self._replacer.sampling_mode, self._replacer.seed = cfg.sampling_mode, cfg.seed
@@ -79,27 +75,24 @@ class PromptSanitizer:
     def evaluator(self):
         if self._evaluator is None:
             from .evaluator import PromptEvaluator
-
             self._evaluator = PromptEvaluator(model_name=self.config.causal_model, device=self.config.device)
         return self._evaluator
 
-    def new_session(self, config: Optional[SanitizerConfig] = None) -> SanitizationSession:
-        cfg = config or self.config
+    def new_session(self, cfg: Optional[SanitizerConfig] = None) -> SanitizationSession:
+        cfg = cfg or self.config
         return SanitizationSession(style=cfg.surrogate_style, seed=cfg.seed)
 
-    # ── main entry point ────────────────────────────────────────
     def sanitize(
         self,
         prompt: str,
         history: Optional[List[str]] = None,
-        config_overrides: Optional[Dict[str, Any]] = None,
         evaluate: bool = True,
         session: Optional[SanitizationSession] = None,
     ) -> SanitizationResult:
         if not prompt or not prompt.strip():
             return SanitizationResult(text=prompt, selected_words=[])
 
-        cfg = self.config.with_overrides(config_overrides) if config_overrides else self.config
+        cfg = self.config
         session = session or self.new_session(cfg)
         history = list(history or session.history)
 

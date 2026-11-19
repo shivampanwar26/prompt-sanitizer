@@ -1,8 +1,36 @@
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
 .venv/
-.env
+venv/
 .pytest_cache/
-frontend/node_modules/
-frontend/dist/
-*.log
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Trained models
+models/**/*.safetensors
+models/**/*.bin
+models/**/*.pt
+models/**/*.pth
+models/**/*.onnx
+
+# Datasets
+data/*.jsonl
+data/*.json
+*.jsonl.gz
+
+# Cache
+.cache/
+huggingface_cache/
+nltk_data/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

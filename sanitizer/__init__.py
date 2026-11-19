@@ -10,7 +10,6 @@ from .config import SanitizerConfig
 from .evaluator import PromptEvaluator
 from .surrogates import SurrogateGenerator
 from .types import SanitizationResult, WordScore
-from .dataset import generate_dataset_from_file, generate_sanitized_dataset
 
 __all__ = [
     "PromptSanitizer",
@@ -19,7 +18,5 @@ __all__ = [
     "PromptEvaluator",
     "SurrogateGenerator",
     "SanitizationResult",
-    "WordScore",
-    "generate_dataset_from_file",
-    "generate_sanitized_dataset",
+    "WordScore"
 ]

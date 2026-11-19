@@ -4,15 +4,15 @@ Language-model surprise is not a reliable signal on its own: ordinary medical
 words and uncommon phrasing are surprising too.  This module finds values
 whose *form* or *context* is sufficient evidence that they are sensitive:
 
-1. Validated pattern recognizers – a regex proposes, a checksum or parser
+1. Validated pattern recognizers - a regex proposes, a checksum or parser
    disposes (Luhn for cards, mod-97 for IBAN, Verhoeff for Aadhaar,
    ``ipaddress`` for IPs, Shannon entropy for generic secrets).
-2. Context recognizers – "my name is X", "Dr. X", "password is X",
-   "patient ID: X" – which catch values no format rule can.
-3. Named-entity recognition – a transformer NER model (PER / LOC / ORG),
+2. Context recognizers - "my name is X", "Dr. X", "password is X",
+   "patient ID: X" - which catch values no format rule can.
+3. Named-entity recognition - a transformer NER model (PER / LOC / ORG),
    with NLTK's chunker as an offline fallback, filtered against code
    identifiers so ``ImportError`` or ``psycopg2`` are never "people".
-4. Entity propagation – once "Sarah Connor" is found, every later "Sarah",
+4. Entity propagation - once "Sarah Connor" is found, every later "Sarah",
    "Connor" or "Sarah Connor" is hidden too (the paper's repeated-entity
    problem, solved at the span level rather than only by score pooling).
 """
@@ -56,10 +56,10 @@ _PRIORITY = {
 def _digits(value: str) -> str:
     return re.sub(r"\D", "", value)
 
-
+# credit/debit card validation
 def luhn_valid(value: str) -> bool:
     digits = _digits(value)
-    if not 13 <= len(digits) <= 19 or len(set(digits)) == 1:
+    if not 13 <= len(digits) <= 19:
         return False
     total = 0
     for i, ch in enumerate(reversed(digits)):

@@ -1,12 +1,12 @@
 """One causal-LM pass that yields both ProSan signals per word.
 
-* Self-information  I(w) = -log2 P(w | context)   (privacy, Section IV-B)
-* Utility importance K_w                          (Section IV-A)
+* Self-information  I(w) = -log2 P(w | context)   (privacy)
+* Utility importance K_w
 
 Compared with computing the two in separate passes (and without a BOS token):
 
 * A BOS token is prepended, so the first word gets a real surprisal instead
-  of 0 – otherwise "Jack was born on ..." can never select "Jack".
+  of 0 - otherwise "Jack was born on ..." can never select "Jack".
 * The BOS token also absorbs the *attention sink*.  Raw column sums of a
   causal attention matrix are dominated by the first position and are biased
   towards early tokens (they are attended by more rows).  Importance here is

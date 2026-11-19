@@ -2,47 +2,30 @@ import argparse
 import sys
 import time
 
-from sanitizer import PromptSanitizer, SanitizerConfig
+from sanitizer import PromptSanitizer
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="ProSan Prompt Privacy Sanitizer — Clean & Simple CLI"
+        description="Prompt Privacy Sanitizer"
     )
     parser.add_argument(
         "text",
         nargs="*",
-        help="Prompt text to sanitize (e.g. python -m app.cli 'My name is John')",
+        help="Prompt text to sanitize",
     )
-    parser.add_argument("--file", "-f", type=str, help="Path to file containing prompts (one per line)")
-    parser.add_argument(
-        "--history",
-        nargs="+",
-        help="Optional multi-turn conversation context history",
-    )
+    parser.add_argument("--file", "-f", type=str, help="Path to file containing prompts")
     parser.add_argument(
         "--eval",
         action="store_true",
         default=False,
         help="Enable evaluation metrics (perplexity, PHR). Adds ~30%% latency.",
     )
-    parser.add_argument("--mode", choices=["prosan", "pii_only"], help="Override the configured mode")
-    parser.add_argument("--style", choices=["realistic", "placeholder"], help="Surrogate style")
-    parser.add_argument("--config", default="config/config.yaml", help="YAML configuration file")
-    parser.add_argument("--train", metavar="JSONL", help="Fine-tune a local seq2seq sanitizer on JSONL pairs")
-    parser.add_argument("--output-dir", default="models/local-sanitizer", help="Where --train saves the model")
-    parser.add_argument("--local-model", metavar="DIR", help="Sanitize with a fine-tuned local seq2seq model")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-
-    if args.train:
-        from sanitizer.seq2seq import train_seq2seq
-
-        print(f"Saved local sanitizer to {train_seq2seq(args.train, args.output_dir)}")
-        return
 
     prompts = []
     if args.file:
@@ -59,23 +42,13 @@ def main():
         print("Error: No prompt provided.")
         sys.exit(1)
 
-    if args.local_model:
-        from sanitizer.seq2seq import LocalSeq2SeqSanitizer
-
-        local = LocalSeq2SeqSanitizer(args.local_model)
-        for prompt in prompts:
-            print(local.sanitize(prompt))
-        return
-
     t0 = time.time()
-    overrides = {k: v for k, v in (("mode", args.mode), ("surrogate_style", args.style)) if v}
-    config = SanitizerConfig.load_from_yaml(args.config).with_overrides(overrides)
-    sanitizer = PromptSanitizer(config=config)
+    sanitizer = PromptSanitizer()
     session = sanitizer.new_session()
     t_model_load = time.time() - t0
 
     print("\n" + "=" * 80)
-    print(" ProSan Prompt Privacy Sanitizer ")
+    print(" Prompt Privacy Sanitizer ")
     print("=" * 80)
 
     for idx, prompt in enumerate(prompts, start=1):
@@ -83,7 +56,11 @@ def main():
             print(f"\n--- Prompt [{idx}/{len(prompts)}] ---")
 
         t_start = time.time()
-        result = sanitizer.sanitize(prompt, history=args.history, evaluate=args.eval, session=session)
+        result = sanitizer.sanitize(
+            prompt,
+            evaluate=args.eval,
+            session=session
+        )
         t_infer = time.time() - t_start
 
         print("\nOriginal Prompt:")
@@ -123,7 +100,7 @@ def main():
                 )
 
     print("\n" + "=" * 80)
-    print(f"Total time (Model Load: {t_model_load:.2f}s | Mode: {config.mode} | Device: {config.device.upper()})")
+    print(f"Total time (Model Load: {t_model_load:.2f}s)")
 
 
 if __name__ == "__main__":
