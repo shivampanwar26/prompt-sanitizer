@@ -184,17 +184,19 @@ python run_eval.py --dataset data_presidio.json --device auto
 
 | Metric | PII-Only | ProSan+ |
 |---|---|---|
-| PHR (strict whole-span) | 92.9% | **97.1%** |
-| Sensitive-token PHR | 95.6% | **98.2%** |
-| Token precision / recall / F1 | 93.4 / 95.5 / 94.4% | 90.0 / 97.9 / 93.8% |
-| Collateral (non-sensitive tokens changed) | 2.5% | 4.1% |
+| PHR (strict whole-span) | 93.0% | **97.2%** |
+| Sensitive-token PHR | 95.7% | **98.3%** |
+| Token precision / recall / F1 | 93.2 / 95.6 / 94.4% | 89.9 / 98.0 / 93.8% |
+| Collateral (non-sensitive tokens changed) | 2.6% | 4.2% |
 | Benign intact (113 PII-free prompts) | 100.0% | **100.0%** |
 | PPL ratio (mean, sanitized/original) | 1.322 | 1.557 |
-| Latency (s/prompt, warm) | 0.028 | 0.068 |
+| Latency (s/prompt, warm) | 0.031 | 0.075 |
 
-The detection rules were developed against the **even-`template_id` half** of this set only. On
-the held-out **odd-`template_id` half** (1,384 spans, never inspected while tuning), ProSan+ PHR is
-**96.5%** — the figure to quote as generalisation; the 97.1% above is over all 1,500 prompts.
+The set is split by `template_id`: even ids are the development half, odd ids the held-out half
+(1,384 spans). One initial failure review covered the whole set; after the split was introduced,
+every rule change was driven by development-half misses only, so the held-out half is not fully
+blind. ProSan+ PHR is **97.8%** on the development half and **96.5%** on the held-out half — the
+figure to quote as generalisation; the 97.2% above is over all 1,500 prompts.
 
 Each JSON/JSONL/CSV row needs prompt text in one of `prompt`, `text`, `full_text`, `original`, or
 `input`. Optional `sensitive` and `keep` fields provide gold annotations for privacy and utility
@@ -314,10 +316,10 @@ Result vs. the original starter implementation (45 prompts, CPU, `distilgpt2`/`r
 |---|---|---|
 | PHR (sensitive items hidden) | 86.7% | **96.7%** |
 | Utility (task-critical words kept) | 81.0% | **98.0%** |
-| Collateral (non-sensitive words changed) | 6.4% | **1.6%** |
+| Collateral (non-sensitive words changed) | 6.4% | **2.3%** |
 | Benign intact (PII-free prompts left untouched) | 25.0% | **91.7%** |
-| PPL ratio (sanitized/original fluency) | 1.205 | 1.301 |
-| Latency (s/prompt, models warm) | 0.787 | **0.093** |
+| PPL ratio (sanitized/original fluency) | 1.205 | 1.364 |
+| Latency (s/prompt, models warm) | 0.787 | **0.084** |
 
 ## What changed vs. the paper / the first implementation
 
