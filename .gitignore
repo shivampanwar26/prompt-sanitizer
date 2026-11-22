@@ -37,6 +37,7 @@ Thumbs.db
 
 # Frontend dependencies
 frontend/node_modules/
+frontend/dist/
 
 # Generated files
 output/

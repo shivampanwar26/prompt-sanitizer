@@ -18,6 +18,9 @@ app.add_middleware(
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
     allow_methods=["*"],
     allow_headers=["*"],
+    # The image endpoint returns its report in a custom header; browsers hide
+    # custom headers from cross-origin pages unless they are exposed here.
+    expose_headers=["X-Sanitization-Report"],
 )
 
 sanitizer = PromptSanitizer()
@@ -113,7 +116,7 @@ def sanitize(request: SanitizeRequest):
 
 @app.post("/sanitize/batch")
 def sanitize_batch(request: BatchRequest):
-    """Original -> sanitized training pairs (the dashboard downloads these as JSONL)."""
+    """Original -> sanitized pairs, e.g. for building a training set via the API."""
     overrides = request.to_overrides()
     rows = []
     for prompt in request.prompts:

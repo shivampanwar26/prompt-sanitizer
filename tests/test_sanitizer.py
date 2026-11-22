@@ -204,10 +204,16 @@ def test_fastapi_image_endpoint():
     Image.new("RGB", (64, 64), (255, 255, 255)).save(buf, format="PNG")
     buf.seek(0)
 
-    res = TestClient(app).post("/sanitize/image", files={"file": ("test.png", buf, "image/png")})
+    res = TestClient(app).post(
+        "/sanitize/image",
+        files={"file": ("test.png", buf, "image/png")},
+        headers={"Origin": "http://localhost:5173"},
+    )
 
     assert res.status_code == 200
     assert res.headers["content-type"] == "image/png"
+    # The web UI runs on another origin and can only read the report if CORS exposes it.
+    assert "x-sanitization-report" in res.headers["access-control-expose-headers"].lower()
     report = json.loads(res.headers["x-sanitization-report"])
     assert "faces_redacted" in report and "metadata_removed" in report
     assert Image.open(io.BytesIO(res.content)).size == (64, 64)

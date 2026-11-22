@@ -168,6 +168,19 @@ npm run dev
 Open `http://localhost:5173`. CORS is pre-configured for the Vite dev server origin. Set
 `VITE_API_URL` if the API runs somewhere other than `http://127.0.0.1:8000`.
 
+The dashboard has two tabs:
+
+- **Text**: paste a prompt, pick *Safe PII redaction* (`pii_only`) or *ProSan+* (`prosan`), and see
+  the sanitized prompt with every protected span and its replacement. A Copy button copies the
+  result.
+- **Image**: drop or choose an image, choose face pixelation, OCR text redaction and optional deep
+  (ProSan+) text analysis, then view and download the sanitized PNG with its report: faces and
+  text lines redacted, PII kinds found, metadata removed, and any warnings (for example, a missing
+  Tesseract binary). Metadata is always stripped.
+
+Batch sanitization and local-model training remain available through the API (`/sanitize/batch`)
+and the CLI (`--train`, `--local-model`).
+
 ## Evaluating on your own prompt dataset
 
 Pass a dataset file to `run_eval.py`; supported formats are JSONL, JSON, CSV, and plain text
