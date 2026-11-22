@@ -174,10 +174,13 @@ def test_fastapi_endpoints():
     assert client.get("/health").json()["status"] == "ok"
     assert "causal_model" in client.get("/config").json()
 
-    res = client.post("/sanitize", json={"prompt": "My name is Alice and my email is alice@corp.com."})
+    res = client.post("/sanitize", json={"prompt": "My name is Alice and my email is alice@corp.com.",
+                                         "evaluate": True})
     assert res.status_code == 200
     data = res.json()
     assert "alice@corp.com" not in data["sanitized"] and data["perplexity"] is not None
+    # evaluate defaults to False on /sanitize, so no perplexity is computed unless asked.
+    assert client.post("/sanitize", json={"prompt": "Email me@example.com."}).json()["perplexity"] is None
 
     restored = client.post("/restore", json={"text": data["sanitized"], "mapping": data["mapping"]}).json()
     assert "alice@corp.com" in restored["text"]
@@ -185,3 +188,26 @@ def test_fastapi_endpoints():
     rows = client.post("/sanitize/batch", json={"prompts": ["Email me@example.com.", "I have a fever."], "mode": "pii_only"}).json()
     assert rows[1]["sanitized"] == "I have a fever."
     assert client.post("/sanitize", json={"prompt": "hi", "mode": "bogus"}).status_code == 400
+
+
+@pytest.mark.models
+def test_fastapi_image_endpoint():
+    import io
+    import json
+
+    from fastapi.testclient import TestClient
+    from PIL import Image
+
+    from app.main import app
+
+    buf = io.BytesIO()
+    Image.new("RGB", (64, 64), (255, 255, 255)).save(buf, format="PNG")
+    buf.seek(0)
+
+    res = TestClient(app).post("/sanitize/image", files={"file": ("test.png", buf, "image/png")})
+
+    assert res.status_code == 200
+    assert res.headers["content-type"] == "image/png"
+    report = json.loads(res.headers["x-sanitization-report"])
+    assert "faces_redacted" in report and "metadata_removed" in report
+    assert Image.open(io.BytesIO(res.content)).size == (64, 64)

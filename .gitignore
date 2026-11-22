@@ -47,3 +47,16 @@ output/
 __pycache__/
 *.pyc
 .venv/
+# Thesis / research paper sources and builds are kept out of the code repo
+thesis/
+paper/
+report/
+*_LaTeX_Report/
+ProSan_Plus_LaTeX_Report/
+
+# Third-party evaluation datasets (fetch instructions in README)
+data_presidio.json
+data_humaneval.jsonl.gz
+
+# Image CLI default output
+sanitized_images/

@@ -1,6 +1,6 @@
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from .config import SanitizerConfig
 from .nltk_resources import pos_tag
 from .pii import find_pii, masked_ranges
@@ -45,8 +45,12 @@ class PromptSanitizer:
          with a mapping that can restore the LLM's answer.
     """
 
-    def __init__(self, device: Optional[str] = None):
-        self.config = SanitizerConfig()
+    def __init__(self, config: Optional[Union[SanitizerConfig, str]] = None, device: Optional[str] = None):
+        # Accepts PromptSanitizer(), PromptSanitizer(device="cuda"),
+        # PromptSanitizer("cuda") and PromptSanitizer(SanitizerConfig(...)).
+        if isinstance(config, str):
+            config, device = None, device or config
+        self.config = config or SanitizerConfig()
         if device is not None:
             self.config.device = device
         self._analyzer = None
@@ -54,7 +58,9 @@ class PromptSanitizer:
         self._evaluator = None
         self.selector = WordSelector()
         self.privacy = PrivacyCalculator()
-        self._load_prosan_components()
+        # pii_only never touches the language models, so don't load them.
+        if self.config.mode == "prosan":
+            self._load_prosan_components()
 
     def _load_prosan_components(self) -> None:
         if self._analyzer is not None:
@@ -91,11 +97,13 @@ class PromptSanitizer:
         history: Optional[List[str]] = None,
         evaluate: bool = True,
         session: Optional[SanitizationSession] = None,
+        config_overrides: Optional[Dict[str, Any]] = None,
     ) -> SanitizationResult:
         if not prompt or not prompt.strip():
             return SanitizationResult(text=prompt, selected_words=[])
 
-        cfg = self.config
+        # Per-call overrides never mutate the shared instance's config.
+        cfg = self.config.with_overrides(config_overrides) if config_overrides else self.config
         session = session or self.new_session(cfg)
         history = list(history or session.history)
 

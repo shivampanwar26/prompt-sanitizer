@@ -3,6 +3,10 @@ transformers>=4.40
 accelerate
 fastapi
 uvicorn
+python-multipart
 pydantic
 numpy
 nltk
+pillow
+opencv-python-headless<5   # 5.x dropped the bundled Haar cascade data files cv2.data.haarcascades needs
+pytesseract                # in-image text redaction; also needs the Tesseract binary on PATH

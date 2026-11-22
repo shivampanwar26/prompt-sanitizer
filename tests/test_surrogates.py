@@ -26,8 +26,13 @@ def test_distinct_originals_get_distinct_surrogates():
 
 def test_format_preserving_values():
     g = SurrogateGenerator()
-    phone = g.get("PHONE", "+91 98765 43210")
-    assert phone.startswith("+91 ") and len(phone) == len("+91 98765 43210")
+    original = "+91 98765 43210"
+    phone = g.get("PHONE", original)
+    # Shape is kept, but every digit group changes -- including the country code,
+    # since a kept "+91" would leave part of the labelled identifier exposed.
+    assert phone.startswith("+") and len(phone) == len(original)
+    import re
+    assert all(a != b for a, b in zip(re.findall(r"\d+", original), re.findall(r"\d+", phone)))
     card = g.get("CARD_NUMBER", "4111 1111 1111 1111")
     assert len(card) == 19 and not luhn_valid(card)
     assert g.get("IP_ADDRESS", "10.0.4.17").startswith("192.0.2.")

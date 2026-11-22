@@ -10,6 +10,7 @@ from .config import SanitizerConfig
 from .evaluator import PromptEvaluator
 from .surrogates import SurrogateGenerator
 from .types import SanitizationResult, WordScore
+from .image import ImageSanitizer, ImageSanitizationResult
 
 __all__ = [
     "PromptSanitizer",
@@ -18,5 +19,7 @@ __all__ = [
     "PromptEvaluator",
     "SurrogateGenerator",
     "SanitizationResult",
-    "WordScore"
+    "WordScore",
+    "ImageSanitizer",
+    "ImageSanitizationResult",
 ]

@@ -1,4 +1,5 @@
 import argparse
+import os
 import sys
 import time
 
@@ -27,11 +28,57 @@ def parse_args():
         default="auto",
         help="Inference device; auto uses CUDA when available (default: auto).",
     )
+    parser.add_argument(
+        "--image",
+        nargs="+",
+        metavar="PATH",
+        help="Sanitize one or more images instead of text (faces, in-image text, metadata).",
+    )
+    parser.add_argument("--out-dir", default="sanitized_images", help="Where --image writes its output")
+    parser.add_argument("--no-face-redact", action="store_true", help="Skip face detection/redaction for --image")
+    parser.add_argument("--no-text-redact", action="store_true", help="Skip in-image text detection/redaction for --image")
+    parser.add_argument(
+        "--deep",
+        action="store_true",
+        help="For --image: also run OCR'd text through the full contextual pipeline, not just pattern/NER",
+    )
     return parser.parse_args()
+
+
+def run_image_mode(args) -> None:
+    from sanitizer import ImageSanitizer
+
+    os.makedirs(args.out_dir, exist_ok=True)
+    image_sanitizer = ImageSanitizer(redact_faces=not args.no_face_redact, redact_text=not args.no_text_redact)
+    prompt_sanitizer = PromptSanitizer(device=args.device) if args.deep else None
+
+    print("\n" + "=" * 80)
+    print(" Image Privacy Sanitizer ")
+    print("=" * 80)
+
+    for path in args.image:
+        t0 = time.time()
+        result = image_sanitizer.sanitize_file(path, deep=args.deep, prompt_sanitizer=prompt_sanitizer)
+        elapsed = time.time() - t0
+
+        out_path = os.path.join(args.out_dir, os.path.basename(path))
+        result.save(out_path)
+
+        print(f"\n{path} -> {out_path}  ({elapsed:.3f}s)")
+        print(f"  Faces redacted        : {result.faces_redacted}")
+        print(f"  Text regions redacted : {result.text_regions_redacted}"
+              + (f"  [{', '.join(result.pii_kinds_found)}]" if result.pii_kinds_found else ""))
+        print(f"  Metadata removed      : {', '.join(result.metadata_removed) or '(none found)'}")
+        for warning in result.warnings:
+            print(f"  Warning: {warning}")
 
 
 def main():
     args = parse_args()
+
+    if args.image:
+        run_image_mode(args)
+        return
 
     prompts = []
     if args.file:
