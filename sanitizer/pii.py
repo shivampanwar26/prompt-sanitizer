@@ -229,7 +229,10 @@ _RECOGNIZERS: List[_Recognizer] = [
     # Dotted dates need a 4-digit year so version numbers ("3.10.12") are not dates.
     ("DATE", re.compile(r"\b\d{4}([-/.])\d{1,2}\1\d{1,2}\b|\b\d{1,2}([/-])\d{1,2}\2(?:\d{4}|\d{2})\b|\b\d{1,2}\.\d{1,2}\.\d{4}\b"), None, None),
     ("DATE_TIME", re.compile(r"\b\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?\b"), None, None),
-    ("DATE", re.compile(r"\bon\s+(?P<uval>Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\b", re.I), None, "uval"),
+    # A weekday after a temporal cue is a date: "on Monday", "meet Tuesday", "by Friday".
+    ("DATE", re.compile(
+        r"\b(?:on|this|next|last|until|till|by|from|meet|see|call|visit)\s+"
+        r"(?P<uval>Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\b", re.I), None, "uval"),
     ("AGE", re.compile(r"(?i:\bage(?:d)?(?:\s+is)?\s*[:=]?\s*)(?P<uval>\d{1,3})\b"),
      lambda t, m: 0 < int(m.group("uval")) <= 120, "uval"),
     ("AGE", re.compile(r"(?i:\b(?:age\s+of|retired\s+at\s+(?:the\s+)?age(?:\s+of)?|i['’]ll\s+(?:just\s+)?turn|(?:i|he|she|they|we)\s+(?:(?:just|recently|will)\s+)?turn(?:ed|ing)?|turn(?:ed|ing)?)\s*)(?P<uval>\d{1,3})\b"),

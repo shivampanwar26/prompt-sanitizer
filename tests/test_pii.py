@@ -207,3 +207,9 @@ def test_surname_prefixes_are_not_code_identifiers():
 
     assert not _is_code_like("McDowell") and not _is_code_like("MacLeod")
     assert _is_code_like("ImportError")
+
+
+def test_weekday_after_temporal_cue_is_a_date_not_a_person():
+    found = kinds("We'll meet Monday at the office")
+    assert ("DATE", "Monday") in found
+    assert not any(k == "PERSON" for k, _ in found)
