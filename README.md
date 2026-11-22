@@ -187,6 +187,21 @@ The dashboard has two tabs:
 
 Batch sanitization (`/sanitize/batch`) remains available through the API.
 
+## Comparison with prior work
+
+[comparisons/](comparisons/README.md) measures ProSan+ in the settings of two earlier papers, so
+it can be compared with the numbers they publish. The other methods are not re-run; their numbers
+are as reported.
+
+| Setting | ProSan+ (measured) | Published results |
+|---|---|---|
+| ProSan's protocol (re-created; MedQA, SAMSum, CodeAlpaca; 500 prompts each), PHR | 72.1% lenient / 45.6% strict | ProSan 96.0–99.8%, SanText+ 66.9%, HaS 58.3% |
+| Rap-LI's PII leakage on PIIDocs (500 documents), lower is better | 8.3% (exact) / 18.0% (strict) | Rap-LI ≈12.9%, HaS ≈11%, Kan's ≈6.7%, SnD ≈8.2%, SanText+ ≈29.7%, CusText+ 71.7% (ε=1) |
+
+ProSan+ is strong on identifiers but weak on sensitive *attributes*: it rarely hides occupation
+(4%), sexual orientation (2%) or race (52%) mentioned in a prompt, and it catches usernames and
+passwords written into prose only about half the time.
+
 ## Edge-case test sets (text and image)
 
 [data/testcases/](data/testcases/README.md) holds 25 labelled text prompts and 25 labelled images.
