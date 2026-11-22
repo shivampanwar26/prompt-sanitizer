@@ -68,6 +68,8 @@ app/
 frontend/            React/Vite dashboard (talks to app/main.py)
 tests/               pytest suite (fast + @pytest.mark.models)
 data/benchmark.jsonl gold-labelled prompts used by benchmark.py
+data/testcases/      25 text + 25 image edge-case tests at none / medium / full privacy
+run_image_cases.py   evaluates the image sanitizer on data/testcases/image_cases.jsonl
 config/config.yaml   default configuration
 ```
 
@@ -180,6 +182,33 @@ The dashboard has two tabs:
 
 Batch sanitization and local-model training remain available through the API (`/sanitize/batch`)
 and the CLI (`--train`, `--local-model`).
+
+## Edge-case test sets (text and image)
+
+[data/testcases/](data/testcases/README.md) holds 25 labelled text prompts and 25 labelled images.
+They are split across three privacy levels: `none` (output must be unchanged), `medium` and
+`full`. The edge cases include public names, version numbers that look like IPs, placeholders,
+lowercase and accented names, checksummed IDs, secrets in code, tiny and rotated faces, and
+metadata-only privacy.
+
+```bash
+python benchmark.py --data data/testcases/text_cases.jsonl --show
+python run_image_cases.py --show
+```
+
+Current results:
+
+| Set | Measured |
+|---|---|
+| Text (overall) | 93.9% PHR, 77.6% utility, 37.5% benign intact |
+| Text, `medium` | 100% PHR |
+| Text, `full` | 90.6% PHR |
+| Images: faces | 8 of 10 found, 0 false positives (missed: the tiny and the rotated face) |
+| Images: metadata | removed in 7 of 7 cases |
+| Images: OCR text | not checked on the test machine (no Tesseract) |
+
+The low benign figure is a real weakness: public landmarks, fictional characters and tool names
+get rewritten. See the test-set README for a per-case breakdown.
 
 ## Evaluating on your own prompt dataset
 

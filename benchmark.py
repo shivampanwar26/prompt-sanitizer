@@ -14,6 +14,10 @@ Metrics
 Usage
   python benchmark.py                                  # this checkout only, CUDA when available
   python benchmark.py --baseline ../prompt-sanitizer-old   # compare with another checkout
+  python benchmark.py --data data/testcases/text_cases.jsonl   # another labelled set
+
+Rows that carry a ``privacy_level`` (e.g. none / medium / full) also get a
+per-level breakdown.
 """
 
 import argparse
@@ -39,14 +43,18 @@ def _contains(text, item):
     return re.search(pattern, text, re.I) is not None
 
 
-def run_worker(root: str, device: str) -> None:
+def load_rows(path: Path):
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def run_worker(root: str, device: str, data: Path) -> None:
     """Sanitize every benchmark prompt with the package at ``root``; print JSON."""
     os.chdir(root)
     sys.path.insert(0, root)
     from sanitizer import PromptSanitizer
 
     sanitizer = PromptSanitizer(device=device)
-    rows = [json.loads(line) for line in DATA.read_text(encoding="utf-8").splitlines() if line.strip()]
+    rows = load_rows(data)
 
     sanitizer.sanitize("Warm up the models, John.", evaluate=False)
     outputs = []
@@ -61,9 +69,9 @@ def run_worker(root: str, device: str) -> None:
     print("@@RESULT@@" + json.dumps(outputs))
 
 
-def collect(root: str, device: str):
+def collect(root: str, device: str, data: Path):
     proc = subprocess.run(
-        [sys.executable, str(Path(__file__).resolve()), "--worker", root, "--device", device],
+        [sys.executable, str(Path(__file__).resolve()), "--worker", root, "--device", device, "--data", str(data)],
         capture_output=True, text=True, encoding="utf-8",
     )
     marker = [line for line in proc.stdout.splitlines() if line.startswith("@@RESULT@@")]
@@ -148,11 +156,13 @@ def main():
     parser.add_argument("--baseline", help="Path to another checkout to compare against")
     parser.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto")
     parser.add_argument("--show", action="store_true", help="Print every sanitized prompt")
+    parser.add_argument("--data", default=str(DATA), help="Labelled JSONL set (default: data/benchmark.jsonl)")
     parser.add_argument("--worker", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    data = Path(args.data).resolve()
 
     if args.worker:
-        run_worker(args.worker, args.device)
+        run_worker(args.worker, args.device, data)
         return
 
     sys.path.insert(0, str(HERE))
@@ -161,28 +171,42 @@ def main():
 
     device = str(resolve_device(args.device))
 
-    rows = [json.loads(line) for line in DATA.read_text(encoding="utf-8").splitlines() if line.strip()]
+    rows = load_rows(data)
     systems = {}
     if args.baseline:
-        systems["Baseline"] = collect(str(Path(args.baseline).resolve()), device)
-    systems["ProSan+"] = collect(str(HERE), device)
+        systems["Baseline"] = collect(str(Path(args.baseline).resolve()), device, data)
+    systems["ProSan+"] = collect(str(HERE), device, data)
 
     evaluator = PromptEvaluator(model_name="distilgpt2", device=device)
     scores = {name: score(rows, outs, evaluator) for name, outs in systems.items()}
 
     if args.show:
         for i, row in enumerate(rows):
-            print(f"\n[{row['category']}] {row['prompt']}")
+            print(f"\n[{row.get('id', row['category'])}] {row['prompt']}")
             for name, outs in systems.items():
                 print(f"  {name:<9} {outs[i]['text']}")
 
     names = list(scores)
-    print(f"\n{len(rows)} prompts, device={device}\n")
+    print(f"\n{len(rows)} prompts from {data.name}, device={device}\n")
     print(f"{'Metric':<16}" + "".join(f"{n:>12}" for n in names))
     print("-" * (16 + 12 * len(names)))
     for metric in scores[names[0]]:
         fmt = "{:>12.3f}" if metric in ("PPL ratio", "Latency (s)") else "{:>11.1f}%"
         print(f"{metric:<16}" + "".join(fmt.format(scores[n][metric]) for n in names))
+
+    levels = list(dict.fromkeys(row["privacy_level"] for row in rows if "privacy_level" in row))
+    if levels:
+        print(f"\nBy privacy level ({names[-1]}):")
+        print(f"{'Level':<8}{'Prompts':>9}{'PHR':>9}{'Utility':>10}{'Benign':>9}{'Collat.':>9}")
+        outs = systems[names[-1]]
+        for level in levels:
+            idx = [i for i, row in enumerate(rows) if row.get("privacy_level") == level]
+            sub = score([rows[i] for i in idx], [outs[i] for i in idx], evaluator)
+            has_sens = any(rows[i]["sensitive"] for i in idx)
+            has_benign = any(not rows[i]["sensitive"] for i in idx)
+            phr = f"{sub['PHR']:.1f}%" if has_sens else "n/a"
+            benign = f"{sub['Benign intact']:.1f}%" if has_benign else "n/a"
+            print(f"{level:<8}{len(idx):>9}{phr:>9}{sub['Utility']:>9.1f}%{benign:>9}{sub['Collateral']:>8.1f}%")
 
 
 if __name__ == "__main__":
