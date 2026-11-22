@@ -28,6 +28,7 @@ class SanitizeResponse(BaseModel):
     original: str
     sanitized: str
     selected_words: List[dict]
+    already_masked: List[dict]
     mapping: dict
     H_q: float
     gamma_q: float
@@ -52,6 +53,7 @@ def sanitize(request: SanitizeRequest):
         "sanitized": result.text,
         "selected_words": result.selected_words,
         "mapping": result.mapping,
+        "already_masked": result.already_masked,
         "H_q": result.H_q,
         "gamma_q": result.gamma_q,
         "perplexity": result.perplexity,

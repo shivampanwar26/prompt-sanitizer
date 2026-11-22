@@ -34,3 +34,16 @@ nltk_data/
 # OS
 .DS_Store
 Thumbs.db
+
+# Frontend dependencies
+frontend/node_modules/
+
+# Generated files
+output/
+*.zip
+*.pdf
+
+# Python
+__pycache__/
+*.pyc
+.venv/

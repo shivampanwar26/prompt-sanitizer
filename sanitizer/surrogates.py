@@ -18,7 +18,7 @@ import hashlib
 import random
 import re
 import string
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Dict, Optional, Tuple
 
 _FIRST_NAMES = [
@@ -119,6 +119,14 @@ class SurrogateGenerator:
         """surrogate -> original"""
         return dict(self._reverse)
 
+    def reserve_placeholders(self, values):
+        """Avoid mapping an existing numbered marker to a newly detected value."""
+        for value in values:
+            match = re.fullmatch(r"<([A-Z_]+)_(\d{1,9})>", value)
+            if match:
+                kind, index = match.groups()
+                self._counters[kind] = max(self._counters.get(kind, 0), int(index))
+
     def lookup(self, kind: str, original: str) -> Optional[str]:
         return self._forward.get((kind, self._key(kind, original)))
 
@@ -127,7 +135,7 @@ class SurrogateGenerator:
         if key in self._forward:
             return self._forward[key]
 
-        if self.style == "placeholder":
+        if self.style == "placeholder" or kind == "TITLE":
             self._counters[kind] = self._counters.get(kind, 0) + 1
             surrogate = f"<{kind}_{self._counters[kind]}>"
         else:
@@ -176,20 +184,35 @@ class SurrogateGenerator:
 
         if kind == "PERSON":
             n_parts = len(original.split())
+            source_words = {word.casefold() for word in re.findall(r"\w+", original)}
+            first_names = [name for name in _FIRST_NAMES if name.casefold() not in source_words]
+            last_names = [name for name in _LAST_NAMES if name.casefold() not in source_words]
 
             def make(attempt):
-                first = self._pick(_FIRST_NAMES, "first", original, attempt)
+                first = self._pick(first_names or _FIRST_NAMES, "first", original, attempt)
                 if n_parts == 1:
                     return first
-                last = self._pick(_LAST_NAMES, "last", original, attempt)
+                last = self._pick(last_names or _LAST_NAMES, "last", original, attempt)
                 return f"{first} {last}"
             return self._unused(make, original)
 
         if kind == "LOCATION":
-            return self._unused(lambda a: self._pick(_CITIES, kind, original, a), original)
+            source_words = {word.casefold() for word in re.findall(r"\w+", original)}
+            cities = [city for city in _CITIES
+                      if not source_words.intersection(word.casefold() for word in re.findall(r"\w+", city))]
+            return self._unused(lambda a: self._pick(cities or _CITIES, kind, original, a), original)
 
         if kind == "ORGANIZATION":
-            return self._unused(lambda a: self._pick(_ORGS, kind, original, a), original)
+            source_words = {word.casefold() for word in re.findall(r"\w+", original)}
+            organizations = [org for org in _ORGS
+                             if not source_words.intersection(word.casefold() for word in re.findall(r"\w+", org))]
+            if not organizations:
+                organizations = [f"{first} {last} Group"
+                                 for first in _FIRST_NAMES for last in _LAST_NAMES
+                                 if first.casefold() not in source_words
+                                 and last.casefold() not in source_words
+                                 and "group" not in source_words]
+            return self._unused(lambda a: self._pick(organizations or _ORGS, kind, original, a), original)
 
         if kind == "EMAIL":
             def make(attempt):
@@ -230,9 +253,25 @@ class SurrogateGenerator:
             return value
 
         if kind == "PHONE":
-            # Keep an international prefix ("+91") so the region stays meaningful.
-            m = re.match(r"^\+\d{1,3}", original)
-            return _replace_chars(original, rng, keep_prefix=m.end() if m else 0)
+            # Change every numeric group. Keeping a country code or an unchanged
+            # short group leaves part of the labeled phone identifier exposed.
+            def make(attempt):
+                candidate = _replace_chars(
+                    original, _stable_rng(self.secret, kind, original, str(attempt))
+                )
+                old_groups = re.findall(r"\d+", original)
+                new_groups = re.findall(r"\d+", candidate)
+                if any(old == new for old, new in zip(old_groups, new_groups)):
+                    # Deterministically alter one digit in each retained group.
+                    chars = list(candidate)
+                    for old, new, match in zip(old_groups, new_groups, re.finditer(r"\d+", candidate)):
+                        if old == new:
+                            index = match.end() - 1
+                            chars[index] = str((int(chars[index]) + 1) % 10)
+                    candidate = "".join(chars)
+                return candidate
+
+            return self._unused(make, original)
 
         if kind == "DATE":
             shifted = self._shift_date(original)
@@ -240,13 +279,47 @@ class SurrogateGenerator:
                 return shifted
             return _replace_chars(original, rng)
 
-        if kind == "ADDRESS":
-            number = rng.randint(10, 999)
-            street = rng.choice(_STREETS)
-            suffix = original.split()[-1] if original.split() else "Street"
-            if suffix.lower().rstrip(".") in ("flat", "house", "apt", "apartment", "suite", "unit") or suffix[:1].isdigit():
+        if kind == "DATE_TIME":
+            match = re.fullmatch(r"(\d{4}-\d{2}-\d{2})([ T])(\d{2}:\d{2})(:\d{2})?", original.strip())
+            if match:
+                shifted_date = self._shift_date(match.group(1)) or match.group(1)
+                time_format = "%H:%M:%S" if match.group(4) else "%H:%M"
+                time_value = datetime.strptime(match.group(3) + (match.group(4) or ""), time_format)
+                minute_shift = rng.choice([n for n in range(-180, 181) if n])
+                shifted_time = (time_value + timedelta(minutes=minute_shift)).strftime(time_format)
+                return f"{shifted_date}{match.group(2)}{shifted_time}"
+            return _replace_chars(original, rng)
+
+        if kind == "AGE":
+            try:
+                age = int(original)
+            except ValueError:
                 return _replace_chars(original, rng)
-            return f"{number} {street} {suffix}"
+            width = len(original)
+            upper = min(120, (10 ** width) - 1)
+            choices = [candidate for candidate in range(1, upper + 1) if candidate != age]
+            if not choices:
+                return _replace_chars(original, rng)
+            value = rng.choice(choices)
+            return f"{value:0{width}d}"
+
+        if kind == "ADDRESS":
+            source_words = {word.casefold() for word in re.findall(r"\w+", original)}
+            suffixes = {"street", "st", "avenue", "ave", "boulevard", "blvd", "road", "rd",
+                        "drive", "dr", "lane", "ln", "way", "place", "court", "circle",
+                        "terrace", "trail", "parkway", "highway"}
+            last_word = original.split()[-1].rstrip(".,") if original.split() else ""
+            suffix = last_word if last_word.casefold() in suffixes else "Street"
+
+            def make(attempt):
+                number = self._pick(tuple(str(n) for n in range(10, 1000)), "address-number", original, attempt)
+                available = [name for name in _STREETS if name.casefold() not in source_words]
+                if not available:
+                    available = list(_STREETS)
+                street = self._pick(available, "address-street", original, attempt)
+                return f"{number} {street} {suffix}"
+
+            return self._unused(make, original)
 
         if kind in ("API_KEY", "SECRET", "PASSWORD", "PRIVATE_KEY", "JWT"):
             if kind == "PRIVATE_KEY":
@@ -268,6 +341,12 @@ class SurrogateGenerator:
     def _shift_date(self, original: str) -> Optional[str]:
         """Parse the date formats the detector emits and shift by the session offset."""
         text = original.strip()
+
+        weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        if text.casefold() in {day.casefold() for day in weekdays}:
+            weekday = next(i for i, day in enumerate(weekdays) if day.casefold() == text.casefold())
+            shift = abs(self._date_shift.days) % 6 + 1
+            return match_case(text, weekdays[(weekday + shift) % 7])
 
         # 2024-01-15
         m = re.fullmatch(r"(\d{4})([-/.])(\d{1,2})\2(\d{1,2})", text)

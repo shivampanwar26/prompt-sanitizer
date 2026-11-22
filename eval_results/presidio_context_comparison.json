@@ -1,0 +1,83 @@
+{
+  "dataset": "data_presidio.json",
+  "before": {
+    "summary": {
+      "name": "ProSan+",
+      "mode": "prosan",
+      "importance_method": "attention",
+      "surrogate_style": "realistic",
+      "num_prompts": 1500,
+      "num_prompts_with_sensitive_spans": 1387,
+      "num_sensitive_spans": 2863,
+      "num_sensitive_labels_unmatched": 0,
+      "num_prompts_without_sensitive_labels": 113,
+      "num_prompts_with_utility_labels": 0,
+      "phr_pct": 91.4,
+      "sensitive_token_phr_pct": 93.8,
+      "token_accuracy_pct": 94.2,
+      "token_precision_pct": 86.6,
+      "token_recall_pct": 93.6,
+      "token_f1_pct": 90.0,
+      "utility_pct": null,
+      "collateral_pct": 5.5,
+      "benign_intact_pct": 75.2,
+      "ppl_ratio": 6.734,
+      "latency_mean_s": 0.022,
+      "latency_median_s": 0.015,
+      "restore_pct": 97.8
+    },
+    "misses": {
+      "GPE": 22,
+      "PHONE_NUMBER": 4,
+      "ORGANIZATION": 31,
+      "NRP": 32,
+      "STREET_ADDRESS": 102,
+      "PERSON": 30,
+      "TITLE": 15,
+      "ZIP_CODE": 5,
+      "IP_ADDRESS": 1,
+      "US_DRIVER_LICENSE": 1,
+      "DATE_TIME": 2
+    }
+  },
+  "after": {
+    "summary": {
+      "name": "ProSan+",
+      "mode": "prosan",
+      "importance_method": "attention",
+      "surrogate_style": "realistic",
+      "num_prompts": 1500,
+      "num_prompts_with_sensitive_spans": 1387,
+      "num_sensitive_spans": 2863,
+      "num_sensitive_labels_unmatched": 0,
+      "num_prompts_without_sensitive_labels": 113,
+      "num_prompts_with_utility_labels": 0,
+      "phr_pct": 91.8,
+      "sensitive_token_phr_pct": 94.2,
+      "token_accuracy_pct": 94.4,
+      "token_precision_pct": 86.7,
+      "token_recall_pct": 94.0,
+      "token_f1_pct": 90.2,
+      "utility_pct": null,
+      "collateral_pct": 5.5,
+      "benign_intact_pct": 75.2,
+      "ppl_ratio": 6.734,
+      "latency_mean_s": 0.018,
+      "latency_median_s": 0.015,
+      "restore_pct": 97.8
+    },
+    "misses": {
+      "GPE": 22,
+      "PHONE_NUMBER": 4,
+      "ORGANIZATION": 31,
+      "NRP": 32,
+      "STREET_ADDRESS": 94,
+      "PERSON": 27,
+      "TITLE": 15,
+      "ZIP_CODE": 5,
+      "IP_ADDRESS": 1,
+      "US_DRIVER_LICENSE": 1,
+      "DATE_TIME": 2
+    }
+  }
+}

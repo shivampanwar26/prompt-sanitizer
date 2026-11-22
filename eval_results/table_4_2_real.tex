@@ -1,0 +1,29 @@
+\begin{table}[!htbp]
+\centering
+\small
+\setlength{\tabcolsep}{5pt}
+\renewcommand{\arraystretch}{1.18}
+\caption{Empirical comparison of PII-Only vs.\ ProSan+ measured on 1500 prompts (\texttt{run\_eval.py}).}
+\label{tab:repo_benchmark}
+\begin{tabularx}{\linewidth}{@{}
+  >{\raggedright\arraybackslash}p{0.18\linewidth}
+  >{\raggedright\arraybackslash}X
+  >{\centering\arraybackslash}p{0.11\linewidth}
+  >{\centering\arraybackslash}p{0.11\linewidth}
+  >{\centering\arraybackslash}p{0.14\linewidth}
+@{}}
+\toprule
+\textbf{Metric} & \textbf{Interpretation} & \textbf{PII-Only} & \textbf{ProSan+} & \textbf{Difference} \\
+\midrule
+\textbf{PHR (\%)} & Sensitive items hidden (higher is better) & 79.9\% & \textbf{87.2\%} & $+7.3$ pp \\
+\textbf{Sensitive-token PHR (\%)} & Sensitive tokens changed, including partial-span protection & 84.6\% & \textbf{91.0\%} & $+6.4$ pp \\
+\textbf{Token accuracy (\%)} & Token-level detection accuracy & 93.9\% & \textbf{93.3\%} & $-0.6$ pp \\
+\textbf{Token F1 (\%)} & Token-level precision/recall balance & 88.4\% & \textbf{88.1\%} & $-0.3$ pp \\
+\textbf{Utility (\%)} & Task-critical words kept (higher is better) & -- & \textbf{--} & -- \\
+\textbf{Collateral (\%)} & Non-sensitive words changed (lower is better) & 2.3\% & \textbf{5.5\%} & $+3.2$ pp \\
+\textbf{Benign Intact (\%)} & PII-free prompts untouched (higher is better) & 100.0\% & \textbf{75.2\%} & $-24.8$ pp \\
+\textbf{PPL Ratio} & Sanitized/original perplexity (closer to 1.0) & 2.414 & 2.621 & $+0.207$ \\
+\textbf{Warm Latency} & Seconds per prompt (lower is better) & 0.019~s & \textbf{0.060~s} & 0.3$\times$ \\
+\bottomrule
+\end{tabularx}
+\end{table}

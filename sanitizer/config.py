@@ -11,7 +11,7 @@ class SanitizerConfig:
     mode: str = "prosan"
 
     ner_backend: str = "transformer"
-    ner_threshold: float = 0.8
+    ner_threshold: float = 0.5
     ner_labels: Tuple[str, ...] = ("PER", "LOC", "ORG")
     propagate_entities: bool = True
 

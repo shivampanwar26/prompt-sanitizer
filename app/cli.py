@@ -21,6 +21,12 @@ def parse_args():
         default=False,
         help="Enable evaluation metrics (perplexity, PHR). Adds ~30%% latency.",
     )
+    parser.add_argument(
+        "--device",
+        choices=("auto", "cuda", "cpu"),
+        default="auto",
+        help="Inference device; auto uses CUDA when available (default: auto).",
+    )
     return parser.parse_args()
 
 
@@ -43,9 +49,10 @@ def main():
         sys.exit(1)
 
     t0 = time.time()
-    sanitizer = PromptSanitizer()
+    sanitizer = PromptSanitizer(device=args.device)
     session = sanitizer.new_session()
     t_model_load = time.time() - t0
+    print(f"Inference device: {sanitizer._analyzer.device}")
 
     print("\n" + "=" * 80)
     print(" Prompt Privacy Sanitizer ")
@@ -81,6 +88,8 @@ def main():
                 print(f"  Privacy Hiding Rate (PHR)    : {result.phr:.2f}%")
         print(f"  Inference Latency            : {t_infer:.3f} seconds")
 
+        if result.already_masked:
+            print("\nAlready masked:", ", ".join(span["word"] for span in result.already_masked))
         print("\nDesensitized Word Spans:")
         if not result.selected_words:
             print("  (No sensitive words or PII detected)")

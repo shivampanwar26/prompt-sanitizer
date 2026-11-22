@@ -29,7 +29,7 @@ def test_does_not_return_overlapping_spans():
     ("My SSN is 123-45-6789.", ("SSN", "123-45-6789")),
     ("IBAN GB82 WEST 1234 5698 7654 32 failed", ("IBAN", "GB82 WEST 1234 5698 7654 32")),
     ("born on July 2nd", ("DATE", "July 2nd")),
-    ("lives at 42 Oak Street, Seattle", ("ADDRESS", "42 Oak Street")),
+    ("lives at 42 Oak Street, Seattle. Please call.", ("ADDRESS", "42 Oak Street, Seattle")),
     ("my password is hunter2.", ("PASSWORD", "hunter2")),
     ("patient ID: MRN-48213 admitted", ("ID_NUMBER", "MRN-48213")),
     ("My name is Priya Nair and", ("PERSON", "Priya Nair")),
@@ -74,3 +74,77 @@ def test_entity_propagation_hides_every_mention():
     assert ("PERSON", "Rahul") in found
     assert ("PERSON", "Sharma") in found
     assert ("LOCATION", "Pune") in found
+
+
+def test_middle_initial_and_extended_contact_fields():
+    assert ("PERSON", "Anita Q. Baker") in kinds("Signed by Anita Q. Baker.")
+    assert ("POSTAL_CODE", "12345-678") in kinds("ZIP: 12345-678")
+    assert ("PHONE", "(898)666-3621x0135") in kinds("Desk: (898)666-3621x0135")
+
+
+def test_existing_masks_are_separate_from_new_edits(monkeypatch):
+    from sanitizer.sanitizer import PromptSanitizer
+
+    monkeypatch.setattr(PromptSanitizer, "_load_prosan_components", lambda self: None)
+    sanitizer = PromptSanitizer()
+    sanitizer.config.ner_backend = "none"
+    sanitizer.config.surrogate_style = "placeholder"
+    candidates = []
+    def inspect(prompt, words, *args):
+        candidates.extend(w["word"] for w in words)
+        return 0.0, 0.0
+    monkeypatch.setattr(sanitizer, "_contextual", inspect)
+    text = "Keep <EMAIL_1> or [REDACTED]; password=****; email: alice@example.org"
+    result = sanitizer.sanitize(text, evaluate=False)
+    assert result.text == text.replace("alice@example.org", "<EMAIL_2>")
+    assert [s["word"] for s in result.already_masked] == ["<EMAIL_1>", "[REDACTED]", "****"]
+    assert all(text[s["start"]:s["end"]] == s["word"] for s in result.already_masked)
+    assert "REDACTED" not in candidates and "EMAIL_1" not in candidates
+    assert sanitizer.restore(result.text, result.mapping) == text
+    assert not sanitizer.sanitize(result.text, evaluate=False).selected_words
+    assert ("PASSWORD", "abc***") in kinds("password=abc***")
+
+
+def test_private_profile_and_employer_context():
+    assert ("TITLE", "Dr.") in kinds("Ask Dr. Amara Shah.")
+    assert ("TITLE", "Systems engineer") in kinds("Systems engineer\n\nContact details:")
+    assert ("TITLE", "Operations manager") in kinds("Occupation: Operations manager")
+    assert ("ORGANIZATION", "Cedar Labs") in kinds("I worked for Cedar Labs as an engineer.")
+    assert not kinds("The engineer explained how relays work for a controller.")
+    assert not kinds("Turn onto River Dr.")
+    text = "Update the billing address with 42 Cedar Road for this card: 4111111111111111"
+    assert ("ADDRESS", "42 Cedar Road") in kinds(text)
+    assert ("CARD_NUMBER", "4111111111111111") in kinds(text)
+
+
+def test_post_office_box_and_address_block_offsets():
+    assert ("ADDRESS", "P.O. Box 821") in kinds("Mail to P.O. Box 821.")
+    for separator in ("\n", "\r\n"):
+        record = separator.join(["314 Cedarstrasse 26", "London", "12345"])
+        assert ("ADDRESS", record) in kinds(">" + record + separator + "Phone: +1 555 123 4567")
+
+
+def test_explicit_names_and_delivery_points():
+    assert ("PERSON", "ines alves") in kinds("My name is ines alves and I need help.")
+    assert ("PERSON", "Kowalski") in kinds("Her maiden name is Kowalski.")
+    assert not kinds("My name is not available.")
+    assert ("ADDRESS", "ul. Lipowa 16") in kinds("Meet me at ul. Lipowa 16.")
+    military = "CMR 122 Box 841\nAPO AE 09012"
+    assert ("ADDRESS", military) in kinds(military)
+    assert ("ADDRESS", "418 Cedarstrand 12\nSuite 4\nOslo") in kinds(
+        "418 Cedarstrand 12\nSuite 4\nOslo\nPhone: +1 202 555 0198"
+    )
+
+
+def test_international_address_boundaries():
+    assert ("ADDRESS", "Lindenstraat 84") in kinds("Meet at Lindenstraat 84 before lunch.")
+    assert ("ADDRESS", "Via delle Rose 17") in kinds("Walk past Via delle Rose 17 today.")
+    for newline in ("\n", "\r\n"):
+        record = newline.join(["415 26 Orchard Street", "Unit 8", "North Bay", "Canada"])
+        for following in ("Reference: A", "Please ring twice.", "Leave at reception.", "We will arrive tomorrow."):
+            assert ("ADDRESS", record) in kinds(record + newline + following)
+    assert not kinds("The release candidate passed gate 12.")
+
+    text = "Meet at Lindenstraat 84 or Lindenstraat 92. Contact: <PERSON_1>"
+    assert [v for k, v in kinds(text) if k == "ADDRESS"] == ["Lindenstraat 84", "Lindenstraat 92"]
+    assert all("<PERSON_1>" not in v for _, v in kinds(text))

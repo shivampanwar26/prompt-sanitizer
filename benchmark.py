@@ -12,7 +12,7 @@ Metrics
   Latency          mean seconds per prompt, models warm, evaluation disabled
 
 Usage
-  python benchmark.py                                  # this checkout only
+  python benchmark.py                                  # this checkout only, CUDA when available
   python benchmark.py --baseline ../prompt-sanitizer-old   # compare with another checkout
 """
 
@@ -43,11 +43,9 @@ def run_worker(root: str, device: str) -> None:
     """Sanitize every benchmark prompt with the package at ``root``; print JSON."""
     os.chdir(root)
     sys.path.insert(0, root)
-    from sanitizer import PromptSanitizer, SanitizerConfig
+    from sanitizer import PromptSanitizer
 
-    config = SanitizerConfig.load_from_yaml()
-    config.device = device
-    sanitizer = PromptSanitizer(config=config)
+    sanitizer = PromptSanitizer(device=device)
     rows = [json.loads(line) for line in DATA.read_text(encoding="utf-8").splitlines() if line.strip()]
 
     sanitizer.sanitize("Warm up the models, John.", evaluate=False)
@@ -55,7 +53,11 @@ def run_worker(root: str, device: str) -> None:
     for row in rows:
         t0 = time.perf_counter()
         result = sanitizer.sanitize(row["prompt"], evaluate=False)
-        outputs.append({"text": result.text, "latency": time.perf_counter() - t0})
+        outputs.append({
+            "text": result.text,
+            "latency": time.perf_counter() - t0,
+            "edits": [{"start": e["start"], "end": e["end"]} for e in result.selected_words],
+        })
     print("@@RESULT@@" + json.dumps(outputs))
 
 
@@ -75,6 +77,7 @@ def score(rows, outputs, evaluator):
     sens_total = sens_hidden = keep_total = keep_kept = 0
     collat_total = collat_changed = 0
     benign = benign_intact = 0
+    token_tp = token_fp = token_fn = token_tn = 0
     ratios = []
     word_re = re.compile(r"\w+(?:['’.@+\-]\w+)*")
 
@@ -83,6 +86,25 @@ def score(rows, outputs, evaluator):
         for item in row["sensitive"]:
             sens_total += 1
             sens_hidden += not _contains(text, item)
+        gold_spans = [
+            (m.start(), m.end())
+            for item in row["sensitive"]
+            for m in re.finditer(re.escape(item), prompt, flags=re.I)
+        ]
+        predicted_spans = [(e["start"], e["end"]) for e in out.get("edits", [])]
+        # Token-level PII detection metrics. Accuracy is paired with P/R/F1
+        # because non-sensitive tokens are the majority class.
+        for token in word_re.finditer(prompt):
+            gold_positive = any(token.start() < end and token.end() > start for start, end in gold_spans)
+            predicted_positive = any(token.start() < end and token.end() > start for start, end in predicted_spans)
+            if gold_positive and predicted_positive:
+                token_tp += 1
+            elif predicted_positive:
+                token_fp += 1
+            elif gold_positive:
+                token_fn += 1
+            else:
+                token_tn += 1
         for item in row["keep"]:
             keep_total += 1
             keep_kept += _contains(text, item)
@@ -103,9 +125,17 @@ def score(rows, outputs, evaluator):
         if orig_ppl > 0:
             ratios.append(san_ppl / orig_ppl)
 
+    token_precision = token_tp / (token_tp + token_fp) if token_tp + token_fp else 0.0
+    token_recall = token_tp / (token_tp + token_fn) if token_tp + token_fn else 0.0
+    token_f1 = 2 * token_precision * token_recall / (token_precision + token_recall) if token_precision + token_recall else 0.0
+    token_total = token_tp + token_fp + token_fn + token_tn
     return {
         "PHR": 100.0 * sens_hidden / max(sens_total, 1),
         "Utility": 100.0 * keep_kept / max(keep_total, 1),
+        "Token accuracy": 100.0 * (token_tp + token_tn) / max(token_total, 1),
+        "Token precision": 100.0 * token_precision,
+        "Token recall": 100.0 * token_recall,
+        "Token F1": 100.0 * token_f1,
         "Collateral": 100.0 * collat_changed / max(collat_total, 1),
         "Benign intact": 100.0 * benign_intact / max(benign, 1),
         "PPL ratio": sum(ratios) / max(len(ratios), 1),
@@ -116,7 +146,7 @@ def score(rows, outputs, evaluator):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--baseline", help="Path to another checkout to compare against")
-    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto")
     parser.add_argument("--show", action="store_true", help="Print every sanitized prompt")
     parser.add_argument("--worker", help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -127,14 +157,17 @@ def main():
 
     sys.path.insert(0, str(HERE))
     from sanitizer.evaluator import PromptEvaluator
+    from sanitizer.model_registry import resolve_device
+
+    device = str(resolve_device(args.device))
 
     rows = [json.loads(line) for line in DATA.read_text(encoding="utf-8").splitlines() if line.strip()]
     systems = {}
     if args.baseline:
-        systems["Baseline"] = collect(str(Path(args.baseline).resolve()), args.device)
-    systems["ProSan+"] = collect(str(HERE), args.device)
+        systems["Baseline"] = collect(str(Path(args.baseline).resolve()), device)
+    systems["ProSan+"] = collect(str(HERE), device)
 
-    evaluator = PromptEvaluator(model_name="distilgpt2", device=args.device)
+    evaluator = PromptEvaluator(model_name="distilgpt2", device=device)
     scores = {name: score(rows, outs, evaluator) for name, outs in systems.items()}
 
     if args.show:
@@ -144,7 +177,7 @@ def main():
                 print(f"  {name:<9} {outs[i]['text']}")
 
     names = list(scores)
-    print(f"\n{len(rows)} prompts, device={args.device}\n")
+    print(f"\n{len(rows)} prompts, device={device}\n")
     print(f"{'Metric':<16}" + "".join(f"{n:>12}" for n in names))
     print("-" * (16 + 12 * len(names)))
     for metric in scores[names[0]]:

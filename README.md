@@ -112,6 +112,7 @@ python -m app.cli "My name is John Doe and my email is john@example.com. I have 
 | `-f, --file PATH` | sanitize one prompt per line from a file |
 | `--history TURN [TURN ...]` | prior conversation turns, for multi-turn context |
 | `--eval` | print perplexity, H_q, γ_q, and PHR (adds latency) |
+| `--device {auto,cuda,cpu}` | Use CUDA automatically when available (default: `auto`) |
 | `--mode {prosan,pii_only}` | override the configured pipeline mode |
 | `--style {realistic,placeholder}` | override the surrogate style |
 | `--config PATH` | use a different YAML config file |
@@ -167,6 +168,44 @@ npm run dev
 Open `http://localhost:5173`. CORS is pre-configured for the Vite dev server origin. Set
 `VITE_API_URL` if the API runs somewhere other than `http://127.0.0.1:8000`.
 
+## Evaluating on your own prompt dataset
+
+Pass a dataset file to `run_eval.py`; supported formats are JSONL, JSON, CSV, and plain text
+(one prompt per line). The default primary dataset is the repository's 1,500-row Presidio set;
+you can also specify it explicitly:
+
+```bash
+python run_eval.py --dataset data_presidio.json --device auto
+```
+
+Each JSON/JSONL/CSV row needs prompt text in one of `prompt`, `text`, `full_text`, `original`, or
+`input`. Optional `sensitive` and `keep` fields provide gold annotations for privacy and utility
+metrics. Presidio-style rows are also supported: `full_text` is the prompt and `spans[].entity_value`
+provides the sensitive annotations. TXT files need no labels, so they still produce sanitization,
+latency, collateral, and perplexity results, while label-based PHR and utility metrics are omitted.
+
+Example JSONL row:
+
+```json
+{"prompt":"Email me at alex@example.com about my appointment.","sensitive":["alex@example.com"],"keep":["appointment"]}
+```
+
+The run writes its reports under `eval_results` by default. Choose another directory with
+`--out-dir results/my_dataset`.
+
+`run_eval.py` includes token-level accuracy, precision, recall, and F1 against annotated spans.
+`benchmark.py` remains a supplemental 45-prompt suite because that set includes `keep` annotations
+for measuring task utility.
+
+PHR uses type-aware checks: emails, domains, URLs, and timestamps count as hidden when the entire
+identifier is replaced, while other spans require every meaningful token to be edited and absent
+from its replacement. The reports retain this strict whole-span PHR and also provide
+`sensitive_token_phr_pct`, which counts protected tokens inside partially sanitized spans. Each
+annotated span has an audit record with its protected-token count and full-span status, so partial
+protection is visible without silently redefining strict PHR. Results also include annotation counts
+and exact prompt round-trip restoration. Utility retention is reported only when the dataset supplies
+`keep` annotations; it remains N/A for datasets without them.
+
 ## Configuration (`config/config.yaml`)
 
 | Key | Meaning |
@@ -180,7 +219,7 @@ Open `http://localhost:5173`. CORS is pre-configured for the Vite dev server ori
 | `privacy_saturation` | κ — bits of self-information at which surprisal risk saturates |
 | `importance_method` | `attention` (1 forward pass, default) or `gradient` (the paper's method, slower) |
 | `eta`, `tau`, `top_k`, `sampling_mode` | replacement generation: Eq. 9 weighting, cumulative truncation, candidate pool size, `sample` vs. `max` |
-| `device` | `auto` / `cpu` / `cuda` |
+| `device` | `auto` (CUDA when available) / `cpu` / `cuda` |
 | `seed` | seeds surrogate generation and stochastic sampling for reproducibility |
 
 Any of these can also be overridden per call without touching the YAML file or the shared
@@ -224,9 +263,10 @@ python benchmark.py --baseline /path/to/other/checkout   # compare against anoth
 python benchmark.py --show                       # print every sanitized prompt
 ```
 
-It reports PHR (sensitive items hidden), utility retention (task-critical words kept), collateral
-damage (non-sensitive words changed anyway), benign-prompt integrity (PII-free prompts left
-untouched), sanitized/original perplexity ratio, and per-prompt latency.
+It reports PHR (sensitive items hidden), task utility, token-level detection accuracy/precision/
+recall/F1 against the gold spans, collateral damage, benign-prompt integrity, perplexity ratio,
+and per-prompt latency. Token accuracy is shown with precision, recall, and F1 because most prompt
+tokens are non-sensitive.
 
 Result vs. the original starter implementation (45 prompts, CPU, `distilgpt2`/`roberta-base`):
 

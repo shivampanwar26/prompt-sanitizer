@@ -1,8 +1,9 @@
 
+import re
 from typing import Any, Dict, List, Optional
 from .config import SanitizerConfig
 from .nltk_resources import pos_tag
-from .pii import find_pii
+from .pii import find_pii, masked_ranges
 from .privacy import PrivacyCalculator
 from .selector import WordSelector
 from .surrogates import SurrogateGenerator, match_case
@@ -44,8 +45,10 @@ class PromptSanitizer:
          with a mapping that can restore the LLM's answer.
     """
 
-    def __init__(self):
+    def __init__(self, device: Optional[str] = None):
         self.config = SanitizerConfig()
+        if device is not None:
+            self.config.device = device
         self._analyzer = None
         self._replacer = None
         self._evaluator = None
@@ -96,6 +99,9 @@ class PromptSanitizer:
         session = session or self.new_session(cfg)
         history = list(history or session.history)
 
+        masks = masked_ranges(prompt)
+        session.surrogates.reserve_placeholders(prompt[start:end] for start, end in masks)
+
         # Step 1: explicit PII, secrets and named entities.
         spans = find_pii(
             prompt, ner_backend=cfg.ner_backend, ner_model=cfg.ner_model,
@@ -111,7 +117,7 @@ class PromptSanitizer:
                                     pos_tag=f"PII:{span.kind}", source=span.source))
 
         def free(start: int, end: int) -> bool:
-            return all(end <= e["start"] or start >= e["end"] for e in edits)
+            return all(end <= left or start >= right for left, right in masks) and all(end <= e["start"] or start >= e["end"] for e in edits)
 
         words = [w for w in extract_words(prompt) if free(w["start"], w["end"])]
 
@@ -143,6 +149,8 @@ class PromptSanitizer:
         result = SanitizationResult(
             text=text, selected_words=edits, H_q=round(H_q, 4), gamma_q=round(gamma_q, 4),
             mapping=session.mapping,
+            already_masked=[{"start": start, "end": end, "word": prompt[start:end]}
+                            for start, end in masks],
         )
         if evaluate:
             from .evaluator import PromptEvaluator
