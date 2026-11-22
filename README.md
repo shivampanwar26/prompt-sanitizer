@@ -171,12 +171,30 @@ Open `http://localhost:5173`. CORS is pre-configured for the Vite dev server ori
 ## Evaluating on your own prompt dataset
 
 Pass a dataset file to `run_eval.py`; supported formats are JSONL, JSON, CSV, and plain text
-(one prompt per line). The default primary dataset is the repository's 1,500-row Presidio set;
-you can also specify it explicitly:
+(one prompt per line). The default primary dataset is the 1,500-row Microsoft Presidio research
+set. It is third-party data and is not committed here (see `.gitignore`); fetch it once:
 
 ```bash
+git clone --depth 1 https://github.com/microsoft/presidio-research.git /tmp/presidio-research
+cp /tmp/presidio-research/data/synth_dataset_v2.json data_presidio.json
 python run_eval.py --dataset data_presidio.json --device auto
 ```
+
+### Results on the Presidio set (1,500 prompts, 2,863 labelled spans, CPU)
+
+| Metric | PII-Only | ProSan+ |
+|---|---|---|
+| PHR (strict whole-span) | 92.9% | **97.1%** |
+| Sensitive-token PHR | 95.6% | **98.2%** |
+| Token precision / recall / F1 | 93.4 / 95.5 / 94.4% | 90.0 / 97.9 / 93.8% |
+| Collateral (non-sensitive tokens changed) | 2.5% | 4.1% |
+| Benign intact (113 PII-free prompts) | 100.0% | **100.0%** |
+| PPL ratio (mean, sanitized/original) | 1.322 | 1.557 |
+| Latency (s/prompt, warm) | 0.028 | 0.068 |
+
+The detection rules were developed against the **even-`template_id` half** of this set only. On
+the held-out **odd-`template_id` half** (1,384 spans, never inspected while tuning), ProSan+ PHR is
+**96.5%** — the figure to quote as generalisation; the 97.1% above is over all 1,500 prompts.
 
 Each JSON/JSONL/CSV row needs prompt text in one of `prompt`, `text`, `full_text`, `original`, or
 `input`. Optional `sensitive` and `keep` fields provide gold annotations for privacy and utility
@@ -205,6 +223,28 @@ annotated span has an audit record with its protected-token count and full-span 
 protection is visible without silently redefining strict PHR. Results also include annotation counts
 and exact prompt round-trip restoration. Utility retention is reported only when the dataset supplies
 `keep` annotations; it remains N/A for datasets without them.
+
+## Image Sanitization
+
+`sanitizer.image.ImageSanitizer` applies the same privacy goal to images, in three independent
+stages that each degrade to a reported warning (never a crash) when an optional dependency is
+missing:
+
+* **Faces** — OpenCV's bundled Haar cascade, fully offline; each face is pixelated/blurred/boxed.
+* **In-image text** — Tesseract OCR; each detected line goes through the same `find_pii` the text
+  pipeline uses, so a screenshot's email is blocked out while its other text stays legible.
+* **Metadata** — EXIF (GPS, camera, timestamps), ICC profiles and PNG text chunks are dropped.
+
+```bash
+python -m app.cli --image photo.jpg scan.png --out-dir sanitized/
+python -m app.cli --image id_card.jpg --deep     # also run OCR'd text through the contextual layer
+curl -X POST "http://127.0.0.1:8000/sanitize/image" -F "file=@photo.jpg" -o sanitized.png
+# the report (faces/text redacted, metadata removed, warnings) is in the X-Sanitization-Report header
+```
+
+`opencv-python-headless` is pinned below 5: the 5.x wheels no longer ship the Haar cascade files.
+Text redaction also needs the Tesseract binary on `PATH` (not just the `pytesseract` package);
+without it the stage is skipped with a warning and the other two still run.
 
 ## Configuration (`config/config.yaml`)
 
@@ -247,8 +287,8 @@ LLM's response back into the real values with `PromptSanitizer.restore(text, map
 ## Testing
 
 ```bash
-pytest -m "not models"   # fast suite, no downloads, ~10s (48 tests)
-pytest                   # full suite including model-backed tests (53 tests)
+pytest -m "not models"   # fast suite, no model downloads
+pytest                   # full suite (87 passed, 3 OCR tests skip when Tesseract is absent)
 ```
 
 ## Benchmarking
@@ -294,6 +334,11 @@ Result vs. the original starter implementation (45 prompts, CPU, `distilgpt2`/`r
 | PHR always ≈100% | Computed only over words already removed | Gold-labelled benchmark (`data/benchmark.jsonl`) |
 | Card/phone false positives | Regex only | Checksums, context and unit guards |
 | Sentence-initial capitalisation treated as identity | Any capitalised word bypassed importance protection | Sentence-initial capitalisation excluded (English orthography, not identity evidence) |
+| Multi-word entities half-exposed ("Hawkins, Richardson **and** Santana", "**the corner of** X **and** Y") | One span per name | Firm-name lists, street corners and company suffixes captured as one span |
+| Addresses detected in fragments; house number, city and postal lines left visible | Per-fragment spans | House-number prefix, fragment merging and following city/region/postal lines folded into one address |
+| Surrogate reused part of the original (`…192` → `192.0.2.x`, `…-22` → `22-…`) | No check | Leak guard: a surrogate may share no identifying token with what it replaces |
+| Lower-case and ALL-CAPS names missed by the case-sensitive NER | Single NER pass | Second pass on a length-preserving truecased copy |
+| "Wisdom", "Sir", "the Devil" rewritten in benign prompts | Capitalised dictionary word = likely name | Only first names, nationalities or multi-word proper names keep the high prior |
 
 ## Known limitations
 
@@ -302,3 +347,8 @@ Result vs. the original starter implementation (45 prompts, CPU, `distilgpt2`/`r
   gazetteer rather than a dictionary check.
 * `ner_backend: transformer` adds model latency; use `nltk` or `none` for lower-latency or fully
   offline deployments at some cost to recall on names/organizations.
+* Nationality adjectives about *things* ("the Russian government", "a French film") are left
+  alone by design — only self-descriptions ("I am cambodian", "we are proud saudis") are treated
+  as personal data. Presidio labels both, so this accounts for most of the remaining NRP misses.
+* Names and addresses in non-Latin scripts (e.g. Greek) are largely missed: the NER model is
+  English-only.

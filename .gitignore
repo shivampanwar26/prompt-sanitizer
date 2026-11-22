@@ -60,3 +60,6 @@ data_humaneval.jsonl.gz
 
 # Image CLI default output
 sanitized_images/
+
+# ...except the small curated gold-label set benchmark.py depends on
+!data/benchmark.jsonl

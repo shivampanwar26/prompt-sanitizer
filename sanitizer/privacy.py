@@ -36,7 +36,7 @@ def is_sentence_initial(text: str, start: int) -> bool:
 _VERSIONED_NAME_RE = re.compile(r"^[A-Za-z]{3,}[0-9]{1,2}$")  # boto3, gpt4, oauth2, web3, python3
 
 
-def privacy_prior(word: str, pos_tag: str, sentence_initial: bool) -> float:
+def privacy_prior(word: str, pos_tag: str, sentence_initial: bool, in_proper_phrase: bool = False) -> float:
     digits = sum(ch.isdigit() for ch in word)
     if digits:
         if _VERSIONED_NAME_RE.match(word):
@@ -54,7 +54,20 @@ def privacy_prior(word: str, pos_tag: str, sentence_initial: bool) -> float:
             # the same regardless of that mistag, so only an unrecognised token
             # ("Estrella opened...") is treated as a likely name.
             return 0.15 if in_dict else 0.85
-        return 0.8 if in_dict else 1.0
+        if not in_dict:
+            return 1.0
+        # A capitalised dictionary word mid-sentence counts as identifying when it
+        # is a known first name ("Grace", "Jack"), a nationality/affiliation
+        # ("Polish", "Czech"), or part of a multi-word proper name ("Scale
+        # Unlimited"). On its own -- "Wisdom", "Sir", "the Devil" -- it is
+        # capitalised for emphasis or address, not identity.
+        from .pii import _NRP_WORDS, _first_names
+
+        lower = word.casefold()
+        if in_proper_phrase or lower in _first_names() or lower in _NRP_WORDS:
+            return 0.8
+        return 0.45
+
     if is_dictionary_word(word):
         if pos_tag.startswith("NN"):
             return 0.3
@@ -85,7 +98,10 @@ class PrivacyCalculator:
         for word, tag in zip(words, pos_tags):
             key = word["word"].lower()
             b = pooled_bits[key]
-            prior = privacy_prior(word["word"], tag, is_sentence_initial(text, word["start"]))
+            # Next to another capitalised word on the same line = part of a proper name.
+            in_phrase = bool(re.search(r"[A-ZÀ-Þ][\w'’-]*[ \t]$", text[:word["start"]])
+                             or re.match(r"[ \t][A-ZÀ-Þ]", text[word["end"]:]))
+            prior = privacy_prior(word["word"], tag, is_sentence_initial(text, word["start"]), in_phrase)
             o = prior * surprisal_risk(b, self.saturation)
             pooled_risk[key] = max(pooled_risk.get(key, 0.0), o)
             raw.append(b)

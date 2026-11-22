@@ -87,6 +87,34 @@ def _replace_chars(value: str, rng: random.Random, keep_prefix: int = 0) -> str:
     return "".join(out)
 
 
+# Structural words a surrogate may legitimately share with the original
+# ("12 Oak Street" -> "40 Elm Street"); they carry no identifying information.
+_NON_IDENTIFYING = {
+    "street", "st", "avenue", "ave", "boulevard", "blvd", "road", "rd", "drive", "dr",
+    "lane", "ln", "way", "place", "pl", "court", "ct", "circle", "cir", "terrace", "ter",
+    "trail", "trl", "parkway", "pkwy", "highway", "hwy", "str", "suite", "apt", "apartment",
+    "unit", "flat", "house", "plot", "box", "the", "and", "com", "www", "http", "https",
+    "example", "inc", "llc", "ltd", "group",
+}
+
+
+def leaks_fragment(original: str, surrogate: str) -> bool:
+    """True if ``surrogate`` contains an identifying token of ``original``.
+
+    A token counts if it has a digit or more than two letters, and is not
+    a structural word such as "Street". Comparison is whole-token and
+    case-insensitive, so "192" leaks into "192.0.2.5" but "12" does not
+    leak into "120".
+    """
+    tokens = {
+        token.casefold() for token in re.findall(r"\w+", original)
+        if (len(token) > 2 or any(ch.isdigit() for ch in token))
+        and token.casefold() not in _NON_IDENTIFYING
+    }
+    surrogate_tokens = {token.casefold() for token in re.findall(r"\w+", surrogate)}
+    return bool(tokens & surrogate_tokens)
+
+
 def _luhn_ok(digits: str) -> bool:
     total = 0
     for i, ch in enumerate(reversed(digits)):
@@ -140,6 +168,18 @@ class SurrogateGenerator:
             surrogate = f"<{kind}_{self._counters[kind]}>"
         else:
             surrogate = self._realistic(kind, original)
+            # Kinds built from a seeded character shuffle can coincidentally
+            # reproduce a group of the original ("71-33-52-22" -> "22-..."),
+            # which re-exposes part of it. Reseed until no fragment survives.
+            base_secret = self.secret
+            try:
+                for attempt in range(1, 40):
+                    if not leaks_fragment(original, surrogate):
+                        break
+                    self.secret = f"{base_secret}~{attempt}"
+                    surrogate = self._realistic(kind, original)
+            finally:
+                self.secret = base_secret
 
         self.register(kind, original, surrogate)
         if kind == "PERSON" and self.style == "realistic":
@@ -160,12 +200,15 @@ class SurrogateGenerator:
     def _pick(self, pool, kind: str, original: str, attempt: int = 0):
         return _stable_rng(self.secret, kind, original.lower(), str(attempt)).choice(pool)
 
-    def _unused(self, make, original: str, limit: int = 25) -> str:
-        """Call make(attempt) until it yields a value not used for another original."""
+    def _unused(self, make, original: str, limit: int = 40) -> str:
+        """Call make(attempt) until it yields a value that is not used for another
+        original and does not reuse any identifying fragment of this one."""
         value = make(0)
         for attempt in range(1, limit):
             owner = self._reverse.get(value)
-            if (owner is None or owner.lower() == original.lower()) and value.lower() != original.lower():
+            if ((owner is None or owner.lower() == original.lower())
+                    and value.lower() != original.lower()
+                    and not leaks_fragment(original, value)):
                 return value
             value = make(attempt)
         return value
@@ -202,6 +245,20 @@ class SurrogateGenerator:
                       if not source_words.intersection(word.casefold() for word in re.findall(r"\w+", city))]
             return self._unused(lambda a: self._pick(cities or _CITIES, kind, original, a), original)
 
+        if kind == "NRP":
+            pool = ["Canadian", "Kenyan", "Chilean", "Norwegian", "Malaysian", "Portuguese",
+                    "Ghanaian", "Estonian", "Peruvian", "Icelandic"]
+            plural = original.endswith("s") and not original.endswith("ss")
+            source = {original.casefold().rstrip("s")}
+
+            def make(attempt):
+                choice = self._pick([p for p in pool if p.casefold() not in source] or pool,
+                                    kind, original, attempt)
+                if plural and not choice.endswith(("ese", "ss")):
+                    choice += "s"
+                return match_case(original, choice)
+            return self._unused(make, original)
+
         if kind == "ORGANIZATION":
             source_words = {word.casefold() for word in re.findall(r"\w+", original)}
             organizations = [org for org in _ORGS
@@ -235,8 +292,14 @@ class SurrogateGenerator:
         if kind == "IP_ADDRESS":
             if ":" in original:
                 return self._unused(lambda a: f"2001:db8::{_stable_rng(original, str(a)).randint(1, 0xFFFF):x}", original)
-            # RFC 5737 documentation range: never routable, clearly not real.
-            return self._unused(lambda a: f"192.0.2.{_stable_rng(original, str(a)).randint(1, 254)}", original)
+            # RFC 5737 documentation ranges: never routable, clearly not real.
+            # Rotating across all three lets the leak guard avoid an original
+            # that itself contains 192, 198, 203, ... as one of its groups.
+            ranges = ("192.0.2", "198.51.100", "203.0.113")
+            return self._unused(
+                lambda a: f"{ranges[a % 3]}.{_stable_rng(self.secret, original, str(a)).randint(1, 254)}",
+                original,
+            )
 
         if kind == "MAC_ADDRESS":
             return _replace_chars(original, rng)

@@ -35,7 +35,11 @@ def test_format_preserving_values():
     assert all(a != b for a, b in zip(re.findall(r"\d+", original), re.findall(r"\d+", phone)))
     card = g.get("CARD_NUMBER", "4111 1111 1111 1111")
     assert len(card) == 19 and not luhn_valid(card)
-    assert g.get("IP_ADDRESS", "10.0.4.17").startswith("192.0.2.")
+    # Always an RFC 5737 documentation address, and never one that reuses a
+    # group of the original (here the "0" rules out 192.0.2.x and 203.0.113.x).
+    ip = g.get("IP_ADDRESS", "10.0.4.17")
+    assert ip.startswith(("192.0.2.", "198.51.100.", "203.0.113."))
+    assert not set(ip.split(".")) & {"10", "0", "4", "17"}
 
 
 def test_date_shift_preserves_intervals():
@@ -58,3 +62,19 @@ def test_placeholder_style_and_restore():
 def test_restore_realistic_names_is_word_bounded():
     mapping = {"Alex": "John", "Alex Reed": "John Doe"}
     assert PromptSanitizer.restore("Alex Reed met Alex at Alexandria.", mapping) == "John Doe met John at Alexandria."
+
+
+def test_surrogate_never_reuses_a_fragment_of_the_original():
+    from sanitizer.surrogates import leaks_fragment
+
+    g = SurrogateGenerator()
+    for kind, original in [("IP_ADDRESS", "172.61.42.192"), ("PHONE", "71-33-52-22"),
+                           ("ADDRESS", "8514 Lyngveien 46"), ("PERSON", "Alex Morgan")]:
+        assert not leaks_fragment(original, g.get(kind, original)), (kind, original)
+
+
+def test_leaks_fragment_ignores_structural_words():
+    from sanitizer.surrogates import leaks_fragment
+
+    assert not leaks_fragment("12 Oak Street", "40 Elm Street")
+    assert leaks_fragment("172.61.42.192", "192.0.2.5")

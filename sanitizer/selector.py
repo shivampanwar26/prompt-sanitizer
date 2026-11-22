@@ -3,6 +3,7 @@ import re
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple
 
+from .nltk_resources import is_dictionary_word
 from .privacy import is_sentence_initial
 from .types import WordScore
 
@@ -122,6 +123,18 @@ class WordSelector:
         w = item.word
         lower = w.lower()
         if lower in _STOPWORDS or lower in _PUBLIC_PROPER or len(w) < 2 and not w.isdigit():
+            return False
+        # Contractions ("I'd", "They're", "don't") are function words, never identities.
+        # A possessive "'s" stays eligible ("Olivia's") unless it follows a pronoun.
+        if re.search(r"['’](?:d|re|ve|ll|m)$|n['’]t$", lower) or re.fullmatch(
+                r"(?:he|she|it|that|there|here|what|who|where|how|let)['’]s", lower):
+            return False
+        # A possessive common noun ("driver's license") is vocabulary, not a name.
+        base = re.sub(r"['’]s$", "", w)
+        if base != w and base.islower() and is_dictionary_word(base):
+            return False
+        # A dictionary word directly followed by ":" is a field label ("Personal Info:").
+        if full_text[item.end:item.end + 1] == ":" and is_dictionary_word(w):
             return False
         if self._is_code_structural(w) or self._is_number_with_unit(item, full_text):
             return False

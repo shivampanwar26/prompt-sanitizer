@@ -211,3 +211,21 @@ def test_fastapi_image_endpoint():
     report = json.loads(res.headers["x-sanitization-report"])
     assert "faces_redacted" in report and "metadata_removed" in report
     assert Image.open(io.BytesIO(res.content)).size == (64, 64)
+
+
+def test_privacy_prior_capitalised_dictionary_words():
+    # Emphasis/address words are not identities; first names, nationalities and
+    # multi-word proper names still are.
+    assert privacy_prior("Wisdom", "NNP", sentence_initial=False) < 0.5
+    assert privacy_prior("Grace", "NNP", sentence_initial=False) >= 0.8
+    assert privacy_prior("Polish", "JJ", sentence_initial=False) >= 0.8
+    assert privacy_prior("Care", "NNP", sentence_initial=False, in_proper_phrase=True) >= 0.8
+
+
+def test_selector_skips_contractions_and_field_labels():
+    selector = WordSelector(min_privacy=0.1)
+    text = "I'd say driver's Info: here"
+    words = [{"word": "I'd", "start": 0, "end": 3}, {"word": "driver's", "start": 8, "end": 16},
+             {"word": "Info", "start": 17, "end": 21}]
+    units, _, _ = selector.select(words, [0.1] * 3, [0.9] * 3, [10.0] * 3, ["NNP", "NN", "NNP"], full_text=text)
+    assert units == []

@@ -148,3 +148,62 @@ def test_international_address_boundaries():
     text = "Meet at Lindenstraat 84 or Lindenstraat 92. Contact: <PERSON_1>"
     assert [v for k, v in kinds(text) if k == "ADDRESS"] == ["Lindenstraat 84", "Lindenstraat 92"]
     assert all("<PERSON_1>" not in v for _, v in kinds(text))
+
+
+# ── Multi-word entities are captured whole (connecting words included) ──
+
+def test_firm_name_list_is_one_organization():
+    assert ("ORGANIZATION", "Hawkins, Richardson and Santana") in kinds("Tomomi is from Hawkins, Richardson and Santana")
+
+
+def test_day_list_is_not_a_firm():
+    assert not any(k == "ORGANIZATION" for k, _ in kinds("We meet Monday, Tuesday and Friday."))
+
+
+def test_street_corner_is_one_address():
+    found = kinds("What is your address? it is the corner of Dalbraut 99 and Frederikke Coves")
+    assert ("ADDRESS", "the corner of Dalbraut 99 and Frederikke Coves") in found
+
+
+def test_template_placeholders_are_never_pii():
+    assert kinds("The corner of {street_name} and {street_name}") == []
+
+
+def test_ship_military_address():
+    assert ("ADDRESS", "USNS Bergman\nFPO AP 93757") in kinds("Send it to USNS Bergman\nFPO AP 93757 please")
+
+
+def test_house_number_and_postal_lines_join_the_address():
+    found = kinds("I'd like a taxi to 692 Kuuse 53 Apt. 641, Grubbenvorst, Netherlands 04020. Thanks")
+    assert any(k == "ADDRESS" and v.startswith("692 ") and v.endswith("04020") for k, v in found)
+
+
+def test_prefix_street_with_number_first():
+    assert ("ADDRESS", "33 avenue de Provence") in kinds("Verda lives on 33 avenue de Provence street.")
+
+
+# ── Self-described affiliation vs. adjectives about things ──
+
+def test_self_described_nationality_is_nrp():
+    assert ("NRP", "cambodian") in kinds("I am cambodian but I live in United Kingdom.")
+
+
+def test_nationality_about_a_thing_is_not_flagged():
+    assert not any(k == "NRP" for k, _ in kinds("The Russian government began the process."))
+
+
+# ── Precision fixes ──
+
+def test_card_number_is_not_matched_inside_an_identifier():
+    assert not any(k == "CARD_NUMBER" for k, _ in kinds("My license number is U62928788557186"))
+
+
+def test_phone_includes_international_prefix():
+    assert any(k == "PHONE" and v.startswith("+1") for k, v in kinds("Desk: +1-903-140-4508x769"))
+
+
+def test_surname_prefixes_are_not_code_identifiers():
+    from sanitizer.pii import _is_code_like
+
+    assert not _is_code_like("McDowell") and not _is_code_like("MacLeod")
+    assert _is_code_like("ImportError")
