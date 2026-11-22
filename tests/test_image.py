@@ -1,13 +1,16 @@
-import shutil
-
 import pytest
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw, ImageFont
 
+import sanitizer.image as image_module
 from sanitizer.image import (
     ImageSanitizer,
+    OcrLine,
+    _respace,
     detect_faces,
     detect_text_blocks,
+    ocr_backend,
     redact_region,
+    replace_text,
     strip_metadata,
 )
 
@@ -17,21 +20,22 @@ try:
 except ImportError:
     _HAS_CV2 = False
 
-try:
-    import pytesseract  # noqa: F401
-    _HAS_OCR = shutil.which("tesseract") is not None
-except ImportError:
-    _HAS_OCR = False
+_HAS_OCR = ocr_backend() is not None
 
 
 def _blank(size=(200, 120), color=(255, 255, 255)) -> Image.Image:
     return Image.new("RGB", size, color)
 
 
-def _text_image(text: str, size=(500, 120)) -> Image.Image:
+def _text_image(text: str, size=(900, 120)) -> Image.Image:
     image = _blank(size)
-    ImageDraw.Draw(image).text((10, 40), text, fill=(0, 0, 0))
+    ImageDraw.Draw(image).text((20, 40), text, fill=(0, 0, 0), font=ImageFont.load_default(size=32))
     return image
+
+
+def _no_ocr(monkeypatch):
+    monkeypatch.setattr(image_module, "_tesseract_ready", lambda: False)
+    monkeypatch.setattr(image_module, "_rapidocr_ready", lambda: False)
 
 
 # ── pure, dependency-free mechanics ─────────────────────────────
@@ -108,24 +112,43 @@ def test_detect_faces_returns_list_type_without_crashing():
         assert faces == []
 
 
-@pytest.mark.skipif(not _HAS_OCR, reason="pytesseract/tesseract binary not installed")
+@pytest.mark.skipif(not _HAS_OCR, reason="no OCR engine (Tesseract or RapidOCR) installed")
 def test_detect_text_blocks_reads_rendered_text():
     blocks = detect_text_blocks(_text_image("HELLO WORLD"))
     assert any("HELLO" in text.upper() for _, text in blocks)
 
 
-def test_detect_text_blocks_returns_empty_without_tesseract(monkeypatch):
-    import builtins
+def test_detect_text_blocks_returns_empty_without_any_ocr_engine(monkeypatch):
+    _no_ocr(monkeypatch)
+    assert detect_text_blocks(_text_image("HELLO WORLD")) == []
 
-    real_import = builtins.__import__
 
-    def _no_pytesseract(name, *args, **kwargs):
-        if name == "pytesseract":
-            raise ImportError("simulated: pytesseract not installed")
-        return real_import(name, *args, **kwargs)
+def test_respace_restores_spaces_ocr_dropped():
+    def line(text):
+        return OcrLine((0, 0, 10 * len(text), 20), text, [(10 * i, 0, 10 * i + 10, 20) for i in range(len(text))])
 
-    monkeypatch.setattr(builtins, "__import__", _no_pytesseract)
-    assert detect_text_blocks(_blank()) == []
+    assert _respace(line("CallRahulat+919820012345aboutthedemo")).text == "Call Rahulat +919820012345 aboutthedemo"
+    assert _respace(line("NAME:ELENA MARKOVA")).text == "NAME: ELENA MARKOVA"
+    assert _respace(line("DearMr.HarutoSato,")).text == "Dear Mr. Haruto Sato,"
+    # Codes, keys, emails, URLs and short tokens are left alone.
+    for text in ("1Z999AA10123456784", "sk_live_51HxQ2eK8pL3mN9vR7tY", "jane.doe@example.com",
+                 "https://api.example.com/v1", "McDonald", "X4829-117-305", "02:10"):
+        assert _respace(line(text)).text == text
+    respaced = _respace(line("Sprint14goals"))
+    assert respaced.text == "Sprint 14 goals" and len(respaced.char_boxes) == len(respaced.text)
+
+
+def test_replace_text_stays_inside_its_box_unless_allowed():
+    image = _blank((400, 60))
+    painted = replace_text(image, (10, 10, 60, 40), "a much longer replacement")
+    assert painted[2] <= 60
+    assert ImageChops.difference(image.crop((61, 0, 400, 60)), _blank((339, 60))).getbbox() is None
+    assert replace_text(_blank((400, 60)), (10, 10, 60, 40), "a much longer replacement", max_right=400)[2] > 60
+
+
+def test_unknown_text_mode_is_rejected():
+    with pytest.raises(ValueError):
+        ImageSanitizer(text_mode="smudge")
 
 
 # ── ImageSanitizer: end-to-end ───────────────────────────────────
@@ -160,22 +183,38 @@ def test_sanitize_reports_warning_when_face_dependency_missing(monkeypatch):
     assert any("face redaction skipped" in w for w in result.warnings)
 
 
-@pytest.mark.skipif(not _HAS_OCR, reason="pytesseract/tesseract binary not installed")
+@pytest.mark.skipif(not _HAS_OCR, reason="no OCR engine (Tesseract or RapidOCR) installed")
 def test_sanitize_redacts_email_in_image_text():
     image = _text_image("Contact me at test@example.com please")
-    result = ImageSanitizer(redact_faces=False).sanitize(image)
+    result = ImageSanitizer(redact_faces=False, text_mode="box").sanitize(image)
 
     assert result.text_regions_redacted >= 1
     assert "EMAIL" in result.pii_kinds_found
 
 
-@pytest.mark.skipif(not _HAS_OCR, reason="pytesseract/tesseract binary not installed")
+@pytest.mark.skipif(not _HAS_OCR, reason="no OCR engine (Tesseract or RapidOCR) installed")
+def test_sanitize_replaces_only_the_sensitive_span_with_a_fake_value():
+    image = _text_image("Send feedback to ana.silva@example.org")
+    result = ImageSanitizer(redact_faces=False).sanitize(image)
+
+    assert [r["kind"] for r in result.text_replacements] == ["EMAIL"]
+    fake = result.text_replacements[0]["replacement"]
+    assert "@" in fake and "ana" not in fake and "silva" not in fake
+    # "Send feedback to" (left part of the line) is pixel-identical.
+    left = (0, 0, 250, 120)
+    assert ImageChops.difference(image.crop(left), result.image.crop(left)).getbbox() is None
+    reread = " ".join(text for _, text in detect_text_blocks(result.image))
+    assert "ana.silva" not in reread
+
+
+@pytest.mark.skipif(not _HAS_OCR, reason="no OCR engine (Tesseract or RapidOCR) installed")
 def test_sanitize_leaves_benign_image_text_untouched():
     image = _text_image("have a nice day")
     result = ImageSanitizer(redact_faces=False).sanitize(image)
 
     assert result.text_regions_redacted == 0
     assert result.pii_kinds_found == []
+    assert ImageChops.difference(image, result.image).getbbox() is None
 
 
 def test_sanitize_file_roundtrip(tmp_path):
@@ -191,14 +230,19 @@ def test_sanitize_file_roundtrip(tmp_path):
         assert reopened.size == (200, 120)
 
 
-def test_sanitize_warns_when_tesseract_binary_missing(monkeypatch):
-    pytesseract = pytest.importorskip("pytesseract")
-
-    def _missing():
-        raise pytesseract.TesseractNotFoundError()
-
-    monkeypatch.setattr(pytesseract, "get_tesseract_version", _missing)
-    monkeypatch.setattr(pytesseract, "image_to_data", lambda *a, **kw: (_ for _ in ()).throw(pytesseract.TesseractNotFoundError()))
+def test_sanitize_warns_when_no_ocr_engine_is_available(monkeypatch):
+    _no_ocr(monkeypatch)
     result = ImageSanitizer(redact_faces=False).sanitize(_blank())
 
-    assert any("Tesseract OCR binary" in w for w in result.warnings)
+    assert any("no OCR engine is available" in w for w in result.warnings)
+    assert result.ocr_engine is None
+
+
+def test_tesseract_is_preferred_and_rapidocr_is_the_fallback(monkeypatch):
+    monkeypatch.setattr(image_module, "_tesseract_ready", lambda: True)
+    monkeypatch.setattr(image_module, "_rapidocr_ready", lambda: True)
+    assert ocr_backend() == "tesseract"
+    assert ocr_backend("rapidocr") == "rapidocr"
+    monkeypatch.setattr(image_module, "_tesseract_ready", lambda: False)
+    assert ocr_backend() == "rapidocr"
+    assert ocr_backend("tesseract") is None

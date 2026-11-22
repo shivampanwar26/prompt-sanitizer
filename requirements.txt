@@ -8,5 +8,6 @@ pydantic
 numpy
 nltk
 pillow
-opencv-python-headless<5   # 5.x dropped the bundled Haar cascade data files cv2.data.haarcascades needs
-pytesseract                # in-image text redaction; also needs the Tesseract binary on PATH
+opencv-python>=4.8,<5      # face detection; 5.x dropped the Haar cascade data files cv2.data.haarcascades needs
+rapidocr_onnxruntime>=1.3,<2; python_version < "3.13"  # offline OCR for in-image text, models ship in the wheel
+pytesseract                # optional, preferred OCR when the Tesseract binary is on PATH

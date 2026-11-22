@@ -22,6 +22,7 @@ async function sanitizeImageRequest(file, options) {
     redact_faces: String(options.redactFaces),
     redact_text: String(options.redactText),
     deep: String(options.deep),
+    text_style: options.textStyle,
   })
   const response = await fetch(`${API_URL}/sanitize/image?${query}`, { method: 'POST', body: form })
   if (!response.ok) {
@@ -114,7 +115,7 @@ function ImageSanitizer({ setError }) {
   const [report, setReport] = useState(null)
   const [busy, setBusy] = useState(false)
   const [dragging, setDragging] = useState(false)
-  const [options, setOptions] = useState({ redactFaces: true, redactText: true, deep: false })
+  const [options, setOptions] = useState({ redactFaces: true, redactText: true, deep: false, textStyle: 'replace' })
 
   useEffect(() => () => { if (originalUrl) URL.revokeObjectURL(originalUrl) }, [originalUrl])
   useEffect(() => () => { if (sanitizedUrl) URL.revokeObjectURL(sanitizedUrl) }, [sanitizedUrl])
@@ -173,6 +174,16 @@ function ImageSanitizer({ setError }) {
           <label><input type="checkbox" checked={options.redactText} onChange={() => toggle('redactText')} /> Redact sensitive text (OCR)</label>
           <label className={options.redactText ? '' : 'disabled'}><input type="checkbox" checked={options.deep} disabled={!options.redactText} onChange={() => toggle('deep')} /> Deep text analysis (ProSan+)</label>
         </div>
+        <div className="controls style-row">
+          <label>Sensitive text
+            <select value={options.textStyle} disabled={!options.redactText} onChange={(event) => setOptions((current) => ({ ...current, textStyle: event.target.value }))}>
+              <option value="replace">Replace with fake values</option>
+              <option value="box">Black box</option>
+              <option value="blur">Blur</option>
+              <option value="pixelate">Pixelate</option>
+            </select>
+          </label>
+        </div>
         <div className="controls">
           <p className="hint">Metadata (EXIF, GPS, camera details) is always removed.</p>
           <button className="primary" onClick={sanitize} disabled={busy || !file}>{busy ? 'Sanitizing…' : 'Sanitize image →'}</button>
@@ -182,7 +193,7 @@ function ImageSanitizer({ setError }) {
 
       <div className="card output-card">
         <div className="card-heading">
-          <div><p className="step">SANITIZED IMAGE</p><h2>{report ? `${report.faces_redacted + report.text_regions_redacted} region${report.faces_redacted + report.text_regions_redacted === 1 ? '' : 's'} redacted` : 'Awaiting input'}</h2></div>
+          <div><p className="step">SANITIZED IMAGE</p><h2>{report ? `${report.faces_redacted + report.text_regions_redacted} item${report.faces_redacted + report.text_regions_redacted === 1 ? '' : 's'} protected` : 'Awaiting input'}</h2></div>
           {sanitizedUrl ? <a className="ghost" href={sanitizedUrl} download={sanitizedName(file?.name || 'image')}>Download</a> : <span className="lock">⌁</span>}
         </div>
         <div className={sanitizedUrl ? 'image-result' : 'image-result empty'}>
@@ -190,8 +201,11 @@ function ImageSanitizer({ setError }) {
         </div>
         {report && <div className="report">
           <div className="stat"><b>{report.faces_redacted}</b><span>faces</span></div>
-          <div className="stat"><b>{report.text_regions_redacted}</b><span>text lines</span></div>
+          <div className="stat"><b>{report.text_regions_redacted}</b><span>text items</span></div>
           <div className="stat"><b>{report.metadata_removed.length}</b><span>metadata fields</span></div>
+          {report.text_replacements?.length > 0 && <div className="replacements">
+            {report.text_replacements.map((item, index) => <div className="span-row" key={`${index}-${item.original}`}><span>{item.kind}</span><code>{item.original}</code><b>{item.replacement}</b></div>)}
+          </div>}
           {report.pii_kinds_found.length > 0 && <div className="report-row"><span>Found</span><div>{report.pii_kinds_found.map((kind) => <code key={kind}>{kind}</code>)}</div></div>}
           {report.metadata_removed.length > 0 && <div className="report-row"><span>Removed</span><div>{report.metadata_removed.map((kind) => <code key={kind}>{kind}</code>)}</div></div>}
           {report.warnings.map((warning) => <p className="warning" key={warning}>{warning}</p>)}

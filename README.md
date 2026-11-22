@@ -59,9 +59,8 @@ sanitizer/          core library (see "Pipeline" above for the module-to-stage m
   surrogates.py       deterministic, format-preserving fake values
   sanitizer.py        PromptSanitizer / SanitizationSession — the orchestrator
   evaluator.py        perplexity, PHR, utility-retention metrics
-  config.py           SanitizerConfig (YAML + per-call overrides)
-  dataset.py          builds (original, sanitized) JSONL pairs for seq2seq fine-tuning
-  seq2seq.py          fine-tune / run a compact local sanitizer model
+  config.py           SanitizerConfig (dataclass defaults + per-call overrides)
+  image.py            ImageSanitizer: metadata, faces, OCR text (replace / box / blur / pixelate)
 app/
   main.py             FastAPI app
   cli.py              command-line interface
@@ -70,7 +69,7 @@ tests/               pytest suite (fast + @pytest.mark.models)
 data/benchmark.jsonl gold-labelled prompts used by benchmark.py
 data/testcases/      25 text + 25 image edge-case tests at none / medium / full privacy
 run_image_cases.py   evaluates the image sanitizer on data/testcases/image_cases.jsonl
-config/config.yaml   default configuration
+past/                the earlier implementation (incl. its seq2seq distillation), kept for reference
 ```
 
 ## Requirements & setup
@@ -91,7 +90,8 @@ Models downloaded on first run (cached under `~/.cache/huggingface`):
 |---|---|---|
 | `distilgpt2` | self-information & importance scoring | ~330 MB |
 | `roberta-base` | masked-LM replacement candidates | ~500 MB |
-| `dslim/distilbert-NER` | named-entity recognition (set `ner_backend: nltk` or `none` to skip) | ~260 MB |
+| `dslim/distilbert-NER` | named-entity recognition (set `ner_backend` to `nltk` or `none` to skip) | ~260 MB |
+| RapidOCR (ONNX, in the pip wheel) | reading text in images when Tesseract isn't installed | ~16 MB |
 
 NLTK resources (`wordnet`, `averaged_perceptron_tagger_eng`, `punkt_tab`, `maxent_ne_chunker_tab`,
 `words`) also auto-download on first use, or pre-fetch them:
@@ -100,8 +100,9 @@ NLTK resources (`wordnet`, `averaged_perceptron_tagger_eng`, `punkt_tab`, `maxen
 python -c "import nltk; [nltk.download(r, quiet=True) for r in ['wordnet','averaged_perceptron_tagger_eng','punkt_tab','maxent_ne_chunker_tab','words']]"
 ```
 
-`mode: pii_only` skips `distilgpt2`/`roberta-base` entirely; NER model download is skipped by
-setting `ner_backend: none` (or `nltk`, which uses NLTK's bundled chunker instead).
+`mode="pii_only"` skips `distilgpt2`/`roberta-base` entirely; the NER model download is skipped
+with `ner_backend="none"` (or `"nltk"`, which uses NLTK's bundled chunker instead). See
+[Configuration](#configuration).
 
 ## Running the CLI
 
@@ -111,24 +112,22 @@ python -m app.cli "My name is John Doe and my email is john@example.com. I have 
 
 | Flag | Purpose |
 |---|---|
-| `-f, --file PATH` | sanitize one prompt per line from a file |
-| `--history TURN [TURN ...]` | prior conversation turns, for multi-turn context |
+| `-f, --file PATH` | sanitize one prompt per line from a file (all lines share one session) |
 | `--eval` | print perplexity, H_q, γ_q, and PHR (adds latency) |
 | `--device {auto,cuda,cpu}` | Use CUDA automatically when available (default: `auto`) |
-| `--mode {prosan,pii_only}` | override the configured pipeline mode |
-| `--style {realistic,placeholder}` | override the surrogate style |
-| `--config PATH` | use a different YAML config file |
-| `--train JSONL --output-dir DIR` | fine-tune a local seq2seq sanitizer on (original, sanitized) pairs |
-| `--local-model DIR` | sanitize using a fine-tuned local model instead of the full pipeline |
+| `--image PATH [PATH ...]` | sanitize images instead of text (see [Image Sanitization](#image-sanitization)) |
+| `--out-dir DIR` | where `--image` writes its output (default `sanitized_images`) |
+| `--text-style {replace,box,blur,pixelate}` | how `--image` changes sensitive text (default `replace`) |
+| `--no-face-redact`, `--no-text-redact`, `--deep` | image stage toggles; `--deep` adds the contextual layer |
 
 ```bash
 python -m app.cli --eval "My name is John Doe and I live in Delhi."
 python -m app.cli -f prompts.txt
-python -m app.cli --history "What is the patient's age?" "45 years old." "Patient John Doe has dyspnea."
-python -m app.cli --mode pii_only "connection = psycopg2.connect(user=Estrella, password=hunter2)"
-python -m app.cli --train data/training.jsonl --output-dir models/local-sanitizer
-python -m app.cli --local-model models/local-sanitizer "Email me@example.com"
+python -m app.cli --image screenshot.png --text-style replace
 ```
+
+Multi-turn history, `pii_only` mode and the other settings are available from Python and the
+REST API (see below).
 
 ## Running the REST API
 
@@ -141,7 +140,8 @@ uvicorn app.main:app --reload --port 8000
 | `GET /health` | liveness check |
 | `GET /config` | current `SanitizerConfig` |
 | `POST /sanitize` | sanitize a prompt; returns text, per-word detail, `H_q`/`γ_q`, and a `mapping` |
-| `POST /sanitize/batch` | sanitize many prompts into (original, sanitized) training pairs |
+| `POST /sanitize/batch` | sanitize many prompts into (original, sanitized) pairs |
+| `POST /sanitize/image` | sanitize an uploaded image; returns a PNG, report in `X-Sanitization-Report` |
 | `POST /restore` | map surrogates in an LLM's reply back to the real values |
 | `POST /evaluate` | perplexity and PHR for an (original, sanitized) pair you already have |
 
@@ -175,13 +175,17 @@ The dashboard has two tabs:
 - **Text**: paste a prompt, pick *Safe PII redaction* (`pii_only`) or *ProSan+* (`prosan`), and see
   the sanitized prompt with every protected span and its replacement. A Copy button copies the
   result.
-- **Image**: drop or choose an image, choose face pixelation, OCR text redaction and optional deep
-  (ProSan+) text analysis, then view and download the sanitized PNG with its report: faces and
-  text lines redacted, PII kinds found, metadata removed, and any warnings (for example, a missing
-  Tesseract binary). Metadata is always stripped.
+- **Image**: drop or choose an image and choose face pixelation, sensitive-text handling and
+  optional deep (ProSan+) text analysis. Sensitive text can be replaced with fake values (default),
+  boxed, blurred or pixelated. You then view and download the sanitized PNG with its report:
+  - faces and text items changed,
+  - each original value next to its replacement,
+  - PII kinds found and metadata removed,
+  - any warnings.
 
-Batch sanitization and local-model training remain available through the API (`/sanitize/batch`)
-and the CLI (`--train`, `--local-model`).
+  Metadata is always stripped.
+
+Batch sanitization (`/sanitize/batch`) remains available through the API.
 
 ## Edge-case test sets (text and image)
 
@@ -200,12 +204,12 @@ Current results:
 
 | Set | Measured |
 |---|---|
-| Text (overall) | 93.9% PHR, 77.6% utility, 37.5% benign intact |
+| Text (overall) | 93.9% PHR, 79.3% utility, 37.5% benign intact |
 | Text, `medium` | 100% PHR |
 | Text, `full` | 90.6% PHR |
 | Images: faces | 8 of 10 found, 0 false positives (missed: the tiny and the rotated face) |
-| Images: metadata | removed in 7 of 7 cases |
-| Images: OCR text | not checked on the test machine (no Tesseract) |
+| Images: metadata | removed in all 5 images that had it |
+| Images: text (RapidOCR) | 24 of 34 sensitive strings hidden (medium 4/4, full 20/30); 25 of 25 benign strings still legible |
 
 The low benign figure is a real weakness: public landmarks, fictional characters and tool names
 get rewritten. See the test-set README for a per-case breakdown.
@@ -275,22 +279,36 @@ stages that each degrade to a reported warning (never a crash) when an optional 
 missing:
 
 * **Faces** — OpenCV's bundled Haar cascade, fully offline; each face is pixelated/blurred/boxed.
-* **In-image text** — Tesseract OCR; each detected line goes through the same `find_pii` the text
-  pipeline uses, so a screenshot's email is blocked out while its other text stays legible.
+* **In-image text** — OCR reads each line with per-character positions. The whole transcript goes
+  through the same `find_pii` the text pipeline uses, so cross-line context such as a name under
+  "SHIP TO:" counts. Only the characters of each sensitive span are changed.
+  - **Default (`replace`):** the span is painted in the local background colour and a realistic fake
+    value is drawn in the original ink colour. A screenshot's email becomes a different, plausible
+    email and the rest of the line is pixel-identical.
+  - **Other styles:** `box`, `blur` and `pixelate`.
+  - **OCR engines:** Tesseract is preferred when its binary is on `PATH`. Otherwise RapidOCR, a pip
+    package whose models ship in the wheel, runs offline.
+  - **Spacing:** RapidOCR often drops spaces ("CallRahulat+9198…"). They are restored from the
+    text's structure (camel-case, letter/digit and label joins) before detection.
 * **Metadata** — EXIF (GPS, camera, timestamps), ICC profiles and PNG text chunks are dropped.
 
 ```bash
 python -m app.cli --image photo.jpg scan.png --out-dir sanitized/
 python -m app.cli --image id_card.jpg --deep     # also run OCR'd text through the contextual layer
-curl -X POST "http://127.0.0.1:8000/sanitize/image" -F "file=@photo.jpg" -o sanitized.png
-# the report (faces/text redacted, metadata removed, warnings) is in the X-Sanitization-Report header
+python -m app.cli --image chat.png --text-style box
+curl -X POST "http://127.0.0.1:8000/sanitize/image?text_style=replace" -F "file=@photo.jpg" -o sanitized.png
+# the report (faces, text replacements, metadata removed, OCR engine, warnings) is in X-Sanitization-Report
 ```
 
-`opencv-python-headless` is pinned below 5: the 5.x wheels no longer ship the Haar cascade files.
-Text redaction also needs the Tesseract binary on `PATH` (not just the `pytesseract` package);
-without it the stage is skipped with a warning and the other two still run.
+OpenCV is pinned below 5 because the 5.x wheels no longer ship the Haar cascade files. Use the
+single `opencv-python` package: RapidOCR depends on it, and having both it and
+`opencv-python-headless` installed lets one overwrite the other's `cv2`. If no OCR engine is
+available, the text stage is skipped with a warning and the other two still run.
 
-## Configuration (`config/config.yaml`)
+## Configuration
+
+Settings are fields of `SanitizerConfig` (`sanitizer/config.py`). Pass a config object, or override
+fields per call or per API request.
 
 | Key | Meaning |
 |---|---|
@@ -306,8 +324,7 @@ without it the stage is skipped with a warning and the other two still run.
 | `device` | `auto` (CUDA when available) / `cpu` / `cuda` |
 | `seed` | seeds surrogate generation and stochastic sampling for reproducibility |
 
-Any of these can also be overridden per call without touching the YAML file or the shared
-instance:
+Any of these can also be overridden per call without changing the shared instance:
 
 ```python
 result = sanitizer.sanitize(prompt, config_overrides={"lambda_scale": 0.5, "surrogate_style": "placeholder"})
@@ -332,7 +349,7 @@ LLM's response back into the real values with `PromptSanitizer.restore(text, map
 
 ```bash
 pytest -m "not models"   # fast suite, no model downloads
-pytest                   # full suite (87 passed, 3 OCR tests skip when Tesseract is absent)
+pytest                   # full suite (103 tests; the 4 OCR tests skip only when no OCR engine is installed)
 ```
 
 ## Benchmarking

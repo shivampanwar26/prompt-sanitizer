@@ -8,6 +8,7 @@ from PIL import Image
 from pydantic import BaseModel, Field
 
 from sanitizer import PromptSanitizer, PromptEvaluator, ImageSanitizer
+from sanitizer.image import TEXT_MODES
 
 app = FastAPI(
     title="Prompt Privacy Sanitizer API",
@@ -146,26 +147,31 @@ async def sanitize_image(
     redact_faces: bool = Query(True),
     redact_text: bool = Query(True),
     deep: bool = Query(False, description="Also run OCR'd text through the full contextual pipeline"),
+    text_style: str = Query("replace", description="'replace' (fake values), 'box', 'blur' or 'pixelate'"),
 ):
     """Redact faces, sensitive in-image text and metadata; returns the sanitized PNG.
 
     The sanitization report is returned as JSON in the ``X-Sanitization-Report``
     header, since the response body itself is the image.
     """
+    if text_style not in TEXT_MODES:
+        raise HTTPException(status_code=400, detail=f"text_style must be one of {', '.join(TEXT_MODES)}.")
     try:
         image = Image.open(io.BytesIO(await file.read()))
         image.load()
     except Exception:
         raise HTTPException(status_code=400, detail="Could not read the uploaded file as an image.")
 
-    local = ImageSanitizer(redact_faces=redact_faces, redact_text=redact_text)
+    local = ImageSanitizer(redact_faces=redact_faces, redact_text=redact_text, text_mode=text_style)
     result = local.sanitize(image, deep=deep, prompt_sanitizer=sanitizer if deep else None)
 
     report = {
         "faces_redacted": result.faces_redacted,
         "text_regions_redacted": result.text_regions_redacted,
+        "text_replacements": result.text_replacements,
         "pii_kinds_found": result.pii_kinds_found,
         "metadata_removed": result.metadata_removed,
+        "ocr_engine": result.ocr_engine,
         "warnings": result.warnings,
     }
     return Response(

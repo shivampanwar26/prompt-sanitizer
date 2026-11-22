@@ -38,6 +38,12 @@ def parse_args():
     parser.add_argument("--no-face-redact", action="store_true", help="Skip face detection/redaction for --image")
     parser.add_argument("--no-text-redact", action="store_true", help="Skip in-image text detection/redaction for --image")
     parser.add_argument(
+        "--text-style",
+        choices=("replace", "box", "blur", "pixelate"),
+        default="replace",
+        help="For --image: replace sensitive text with fake values (default), or box/blur/pixelate it",
+    )
+    parser.add_argument(
         "--deep",
         action="store_true",
         help="For --image: also run OCR'd text through the full contextual pipeline, not just pattern/NER",
@@ -49,7 +55,8 @@ def run_image_mode(args) -> None:
     from sanitizer import ImageSanitizer
 
     os.makedirs(args.out_dir, exist_ok=True)
-    image_sanitizer = ImageSanitizer(redact_faces=not args.no_face_redact, redact_text=not args.no_text_redact)
+    image_sanitizer = ImageSanitizer(redact_faces=not args.no_face_redact, redact_text=not args.no_text_redact,
+                                     text_mode=args.text_style)
     prompt_sanitizer = PromptSanitizer(device=args.device) if args.deep else None
 
     print("\n" + "=" * 80)
@@ -66,8 +73,11 @@ def run_image_mode(args) -> None:
 
         print(f"\n{path} -> {out_path}  ({elapsed:.3f}s)")
         print(f"  Faces redacted        : {result.faces_redacted}")
-        print(f"  Text regions redacted : {result.text_regions_redacted}"
-              + (f"  [{', '.join(result.pii_kinds_found)}]" if result.pii_kinds_found else ""))
+        print(f"  Text spans changed    : {result.text_regions_redacted}"
+              + (f"  [{', '.join(result.pii_kinds_found)}]" if result.pii_kinds_found else "")
+              + (f"  (OCR: {result.ocr_engine})" if result.ocr_engine else ""))
+        for item in result.text_replacements:
+            print(f"    {item['kind']:<14} {item['original']!r} -> {item['replacement']!r}")
         print(f"  Metadata removed      : {', '.join(result.metadata_removed) or '(none found)'}")
         for warning in result.warnings:
             print(f"  Warning: {warning}")

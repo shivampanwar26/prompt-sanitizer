@@ -213,3 +213,10 @@ def test_weekday_after_temporal_cue_is_a_date_not_a_person():
     found = kinds("We'll meet Monday at the office")
     assert ("DATE", "Monday") in found
     assert not any(k == "PERSON" for k, _ in found)
+
+
+def test_ship_to_label_is_not_absorbed_into_the_address():
+    found = kinds("SHIP TO:\nGrace Thompson\n88 Willow Creek Road\nPortland, OR 97205")
+    addresses = [value for kind, value in found if kind == "ADDRESS"]
+    assert addresses and all(not value.startswith((":", "\n")) for value in addresses)
+    assert not any("SHIP" in value or "TO:" in value for _, value in found)

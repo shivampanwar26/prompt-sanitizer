@@ -78,3 +78,15 @@ def test_leaks_fragment_ignores_structural_words():
 
     assert not leaks_fragment("12 Oak Street", "40 Elm Street")
     assert leaks_fragment("172.61.42.192", "192.0.2.5")
+
+
+def test_phone_surrogate_never_has_a_zero_country_code():
+    from sanitizer.surrogates import SurrogateGenerator
+
+    gen = SurrogateGenerator(secret="country-code-check")
+    numbers = ["+919820012345", "+91 98200 12345", "+1 (415) 555-0198", "+44 20 7946 0958", "+9 123 4567"]
+    numbers += [f"+{c} 555 01{n:02d}" for c in (1, 7, 9, 33, 91) for n in range(40)]
+    for number in numbers:
+        fake = gen.get("PHONE", number)
+        assert not fake.lstrip().startswith("+0"), (number, fake)
+        assert fake != number

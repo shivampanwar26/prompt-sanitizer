@@ -84,8 +84,10 @@ python data/testcases/generate_images.py                             # rebuild t
 
 `run_image_cases.py` matches detected faces to `face_boxes` at IoU ≥ 0.3. It checks that the
 expected metadata is reported removed and that none is left in the output. It also checks that
-`none` cases come back pixel-identical. The OCR text checks need the Tesseract binary; without it
-they are reported as **skipped**, never as passed.
+`none` cases come back pixel-identical. The text checks re-run OCR on the sanitized image with
+the same engine the sanitizer used (Tesseract if installed, otherwise RapidOCR). A reader that is
+also the redactor can share its blind spots, so treat the text figures as an upper bound. With no
+OCR engine the text checks are reported as **skipped**, never as passed.
 
 ## Results (CPU, default config)
 
@@ -95,34 +97,43 @@ they are reported as **skipped**, never as passed.
 |---|---|---|---|---|
 | none | n/a | 54.5% | 37.5% | 13.8% |
 | medium | 100.0% | 90.0% | n/a | 5.4% |
-| full | 90.6% | 93.8% | n/a | 13.0% |
-| **all** | **93.9%** | **77.6%** | **37.5%** | **9.9%** |
+| full | 90.6% | 100.0% | n/a | 11.7% |
+| **all** | **93.9%** | **79.3%** | **37.5%** | **9.6%** |
 
 What these numbers mean:
 - **Public names are rewritten.** Only 3 of 8 no-privacy prompts come back unchanged; public
   landmarks and fictional names ("Eiffel Tower", "Harry Potter") and tool names ("pip",
   "nginx") are replaced.
+- **"Wisdom, Patience and Discipline" (T02)** is read as a firm-name list and replaced.
 - **Some full-level items are missed:** the CVV, the card expiry, and the username
   `tomas.herrera88`.
-- **The all-caps shipping address (T22)** is replaced as one block that also swallows the
-  `SHIP TO:` label.
+- **One keep item is lost:** the drug name "amlodipine" (T09) is rewritten.
 
-This set was written after the system was tuned and has not been used for tuning.
+This set was written after the system was tuned on Presidio. One fix was made because of it: the
+all-caps shipping address (T22) used to swallow its `SHIP TO:` label. Apart from that, the set has
+not been used for tuning.
 
-**Images** (`run_image_cases.py`, no Tesseract on the test machine):
+**Images** (`run_image_cases.py`, OCR engine RapidOCR, default `replace` style):
 
-| Level | Face recall | Face precision | Metadata removed | Unchanged |
-|---|---|---|---|---|
-| none | n/a | n/a | n/a | 8/8 |
-| medium | 3/5 | 3/3 | 4/4 | n/a |
-| full | 5/5 | 5/5 | 3/3 | n/a |
-| **all** | **8/10** | **8/8** | **7/7** | **8/8** |
+| Level | Face recall | Face precision | Metadata removed | Sensitive text hidden | Keep text legible | Unchanged |
+|---|---|---|---|---|---|---|
+| none | n/a | n/a | n/a | n/a | 13/13 | 8/8 |
+| medium | 3/5 | 3/3 | 3/3 | 4/4 | 9/9 | n/a |
+| full | 5/5 | 5/5 | 2/2 | 20/30 | 3/3 | n/a |
+| **all** | **8/10** | **8/8** | **5/5** | **24/34** | **25/25** | **8/8** |
+
+The `box` style gives the same text figures; the styles differ only in how a span is drawn.
 
 What these numbers mean:
 - **Two faces are missed:** the tiny face (I14) and the rotated face (I15). The frontal Haar
   cascade is not built to find them.
-- **Text was not checked on this machine** because Tesseract isn't installed, so the "unchanged"
-  check covers face detection and metadata only.
+- **Text misses are bare identity fields with no pattern or context:**
+  - the ID and passport names and numbers (I18, I24), including the passport's machine-readable
+    line;
+  - the business-card name and address (I19);
+  - the card expiry (I20).
+- **This set was used during development.** The OCR spacing repair and transcript-level detection
+  were developed while inspecting failures on this set, so its text figures are not a blind test.
 
 ## Image source and licence
 

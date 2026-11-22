@@ -332,6 +332,13 @@ class SurrogateGenerator:
                             index = match.end() - 1
                             chars[index] = str((int(chars[index]) + 1) % 10)
                     candidate = "".join(chars)
+                # No country code starts with 0: keep "+0..." from looking fake, while
+                # still differing from the original's first digit.
+                plus = re.match(r"\s*\+\s*0", candidate)
+                original_code = re.match(r"\s*\+\s*(\d)", original)
+                if plus and original_code:
+                    first = int(original_code.group(1))
+                    candidate = candidate[:plus.end() - 1] + str(first % 9 + 1) + candidate[plus.end():]
                 return candidate
 
             return self._unused(make, original)

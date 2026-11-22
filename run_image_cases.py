@@ -8,12 +8,15 @@ Per case it checks
   faces     detected faces matched to the ground-truth boxes (IoU >= 0.3)
   metadata  every expected metadata field is reported removed, and the output
             carries no EXIF or PNG text chunks
-  text      (needs Tesseract) OCR of the *sanitized* image: a sensitive string
-            still readable is a leak; a keep string no longer readable is lost
+  text      OCR of the *sanitized* image: a sensitive string still readable is
+            a leak; a keep string no longer readable is lost
   intact    cases labelled "none" must come back pixel-identical
 
-Without the Tesseract binary the text check is reported as skipped, never as
-a pass.
+OCR uses the same engine as the sanitizer (Tesseract if installed, else
+RapidOCR). A reader that is the same as the redactor can share its blind
+spots, so the text figures are an upper bound on what a different OCR would
+find. With no OCR engine the text check is reported as skipped, never as a
+pass.
 """
 
 import argparse
@@ -25,7 +28,7 @@ from pathlib import Path
 
 from PIL import Image, ImageChops
 
-from sanitizer.image import ImageSanitizer, detect_faces, ocr_unavailable_reason
+from sanitizer.image import ImageSanitizer, detect_faces, detect_text_blocks, ocr_backend, ocr_unavailable_reason
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -68,6 +71,7 @@ def main():
     parser.add_argument("--data", default=str(DATA))
     parser.add_argument("--show", action="store_true", help="Print one line per case")
     parser.add_argument("--out-dir", help="Save each sanitized image here")
+    parser.add_argument("--text-mode", default="replace", choices=("replace", "box", "blur", "pixelate"))
     args = parser.parse_args()
 
     data = Path(args.data).resolve()
@@ -75,13 +79,13 @@ def main():
     ocr_reason = ocr_unavailable_reason()
     ocr = None
     if ocr_reason is None:
-        import pytesseract
-        ocr = pytesseract.image_to_string
+        def ocr(image):
+            return "\n".join(text for _, text in detect_text_blocks(image))
     out_dir = Path(args.out_dir) if args.out_dir else None
     if out_dir:
         out_dir.mkdir(parents=True, exist_ok=True)
 
-    sanitizer = ImageSanitizer()
+    sanitizer = ImageSanitizer(text_mode=args.text_mode)
     totals = defaultdict(lambda: defaultdict(int))
     for row in rows:
         with Image.open(data.parent / row["file"]) as img:
@@ -126,9 +130,11 @@ def main():
     def pct(a, b):
         return f"{100.0 * a / b:.1f}%" if b else "n/a"
 
-    print(f"\n{len(rows)} image cases from {data.name}")
+    print(f"\n{len(rows)} image cases from {data.name}, text mode '{args.text_mode}'")
     if ocr_reason:
         print(f"Text checks skipped: {ocr_reason}.")
+    else:
+        print(f"OCR engine: {ocr_backend()}")
     print(f"\n{'Level':<8}{'Cases':>6}{'Face recall':>13}{'Face prec.':>12}{'Metadata':>10}"
           f"{'Text PHR':>10}{'Text kept':>11}{'Intact':>8}")
     for level in [*dict.fromkeys(r["privacy_level"] for r in rows), "all"]:

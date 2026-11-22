@@ -303,7 +303,7 @@ _ADDRESS_BREAK = re.compile(
 _ADDRESS_CONTEXT = re.compile(
     r"(?i)\b(?:(?:(?:home|mailing|billing|street|residential)\s+)?address"
     r"(?:\s+of\s+[^:\n]{1,60})?\s*(?:is\b|with\b|:|=)|(?:offices?|residence)\s+(?:is|are)\s+(?:located\s+)?at"
-    r"|(?:send|sent|ship|shipped|deliver|delivered)\s+(?:it\s+)?to\??\s*(?:user:\s*)?"
+    r"|(?:send|sent|ship|shipped|deliver|delivered)\s+(?:it\s+)?to\s*[?:]?\s*(?:user:\s*)?"
     r"|(?:change|update|switch)\s+(?:my|the|our)\s+(?:(?:primary|secondary|billing|shipping|home)\s+(?:and\s+secondary\s+)?)?address\s+to\s+(?:the\s+same:\s*)?|lives?\s+at|(?:letter|parcel|package)\s+arrived\s+at(?=\s+\d))\s*"
 )
 _ADDRESS_FIELD = re.compile(
@@ -346,6 +346,9 @@ def _context_address_spans(text: str) -> List[PIISpan]:
             selected.append(line)
             size += len(line)
         value = "".join(selected).rstrip()
+        # Never let the block start with the label's own punctuation ("SHIP TO:").
+        lead = len(value) - len(value.lstrip(":;,-–— \t\r\n"))
+        start, value = start + lead, value[lead:]
         # Avoid swallowing a following sentence after a numbered address such
         # as "55 Main Street, Apt 4. Please call me tomorrow."
         value = _trim_address_sentence(value)
